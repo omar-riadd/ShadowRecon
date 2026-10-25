@@ -101,6 +101,9 @@ class Config:
     circuit_breaker: bool = True
     circuit_threshold: int = 5
     circuit_recovery: float = 30.0
+    probe_ports: str = "default"
+    exclude: str = ""
+    safe_mode: bool = False
 
     @property
     def proxies(self) -> dict:
@@ -179,6 +182,10 @@ TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[A
     "circuit_breaker": (bool, None, "Enable per-host circuit breaker"),
     "circuit_threshold": (int, lambda v: v >= 1, "Consecutive failure threshold before tripping circuit (>= 1)"),
     "circuit_recovery": ((int, float), lambda v: v > 0, "Cool-down recovery window in seconds (> 0)"),
+    "probe_ports": (str, None, "Probing ports specification (e.g. 'default', 'web', or '80,443,8080')"),
+    "ports": (str, None, "Probing ports specification (alias for probe_ports)"),
+    "exclude": (str, None, "Comma-separated target exclusion patterns or CIDRs (e.g. 'mail.*,vpn.*,10.0.0.0/8')"),
+    "safe_mode": (bool, None, "Enable production safe-mode guardrails"),
 }
 
 

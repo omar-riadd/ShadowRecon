@@ -69,12 +69,20 @@ class StageContext:
     rate_limiter: Optional[Any] = None
     proxy_provider: Optional[Any] = None
     circuit_breaker: Optional[Any] = None
+    scope: Optional[Any] = None
     drivers: Optional[Any] = None
 
     def __post_init__(self) -> None:
         if self.drivers is None:
             from shadowrecon.drivers.registry import global_registry
             self.drivers = global_registry
+
+    def is_in_scope(self, target: str) -> bool:
+        """Check if target is in-scope according to active ScopeManager or domain."""
+        if self.scope:
+            return self.scope.is_in_scope(target)
+        from shadowrecon.core.scope import in_scope
+        return in_scope(target, self.config.domain, getattr(self.config, "exclude", ""))
 
 
 StageCallable = Callable[[StageContext], Coroutine[Any, Any, Any]]

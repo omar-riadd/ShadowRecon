@@ -19,7 +19,7 @@ from shadowrecon.core.executor import AsyncExecutor, resolve_binary
 from shadowrecon.core.health import PreflightChecker
 from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorProxyProvider
 from shadowrecon.core.ratelimit import AdaptiveRateLimiter
-from shadowrecon.core.scope import parse_target, slugify
+from shadowrecon.core.scope import ScopeManager, parse_target, slugify
 from shadowrecon.core.tor import TorManager
 from shadowrecon.drivers import global_registry
 from shadowrecon.modules.recon import (
@@ -163,6 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-circuit-breaker", action="store_true", help="Disable per-host circuit breaker")
     p.add_argument("--circuit-threshold", type=int, default=5, help="Consecutive failure threshold before tripping circuit (default: 5)")
     p.add_argument("--circuit-recovery", type=float, default=30.0, help="Circuit recovery cool-down window in seconds (default: 30.0)")
+    p.add_argument("--ports", "--probe-ports", dest="probe_ports", default="default", help="HTTP probing port matrix: 'default' (80,443), 'web' (80,443,8000,8080,8443,8888,9000,9443), or custom list (default: default)")
+    p.add_argument("--exclude", default="", help="Comma-separated target exclusion patterns or CIDRs (e.g. 'mail.*,vpn.*,10.0.0.0/8')")
+    p.add_argument("--safe-mode", action="store_true", help="Enable production safety guardrails (clamp concurrency to 2, delay >= 0.5s, non-destructive scans)")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
     p.add_argument("-y", "--yes", action="store_true", help="Assume yes on interactive prompts")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -241,6 +244,24 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     webhook_url = args.webhook_url or os.getenv("SHADOWRECON_WEBHOOK_URL") or toml_cfg.get("webhook_url")
     webhook_events = args.webhook_events or toml_cfg.get("webhook_events", "complete,critical")
 
+    probe_ports = args.probe_ports if args.probe_ports != "default" else toml_cfg.get("probe_ports", toml_cfg.get("ports", "default"))
+    exclude_spec = args.exclude or toml_cfg.get("exclude", "")
+    safe_mode = args.safe_mode or toml_cfg.get("safe_mode", False)
+
+    rate_limit = args.rate_limit if args.rate_limit != 0.0 else toml_cfg.get("rate_limit", 0.0)
+    ffuf_threads = args.threads if args.threads != 5 else toml_cfg.get("threads", toml_cfg.get("ffuf_threads", 5))
+
+    if safe_mode:
+        ffuf_threads = min(ffuf_threads, 2)
+        rate_limit = max(rate_limit, 0.5)
+        log.warning(
+            "[SAFE MODE ENGAGED] Production guardrails active: FFUF threads clamped to %d, request delay >= %.1fs, non-destructive scanners enforced",
+            ffuf_threads,
+            rate_limit,
+        )
+
+    scope_mgr = ScopeManager(domain=domain, exclude=exclude_spec)
+
     # Construct Config
     cfg = Config(
         target=target_url,
@@ -253,9 +274,9 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         tor_control_password=args.tor_pass,
         rotate_wait=args.rotate_wait,
         request_timeout=args.timeout,
-        rate_limit=args.rate_limit,
+        rate_limit=rate_limit,
         max_backoff=max_backoff,
-        ffuf_threads=args.threads,
+        ffuf_threads=ffuf_threads,
         dry_run=args.dry_run,
         use_proxy=not args.no_proxy,
         proxy_provider=proxy_provider_choice,
@@ -281,6 +302,9 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         circuit_breaker=not args.no_circuit_breaker and toml_cfg.get("circuit_breaker", True),
         circuit_threshold=args.circuit_threshold or toml_cfg.get("circuit_threshold", 5),
         circuit_recovery=args.circuit_recovery or toml_cfg.get("circuit_recovery", 30.0),
+        probe_ports=probe_ports,
+        exclude=exclude_spec,
+        safe_mode=safe_mode,
     )
 
     # Initialize Circuit Breaker
@@ -378,6 +402,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         rate_limiter=rate_limiter,
         proxy_provider=proxy_provider,
         circuit_breaker=cb,
+        scope=scope_mgr,
         drivers=global_registry,
     )
 
@@ -529,6 +554,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         print(f" Circuit Breaker   : Enabled ({cb_stats['healthy_hosts']} healthy, {cb_stats['tripped_hosts']} tripped)")
         if cb_stats["tripped_list"]:
             print(f" Tripped Hosts     : {', '.join(cb_stats['tripped_list'])}")
+    if cfg.safe_mode:
+        print(f" Operational Mode   : Safe Mode (Production Guardrails)")
+    if cfg.probe_ports != "default":
+        print(f" Port Matrix       : {cfg.probe_ports}")
+    if cfg.exclude:
+        print(f" Scope Exclusions  : {cfg.exclude}")
     print("=" * 50 + "\n")
 
     # Print Drift Report to console if generated

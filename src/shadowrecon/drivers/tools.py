@@ -33,7 +33,7 @@ class SubfinderDriver(ScannerDriver):
         subs: Set[str] = set()
         for line in res.stdout.splitlines():
             clean = line.strip().lower()
-            if clean and is_in_scope(clean, ctx.config.domain):
+            if clean and ctx.is_in_scope(clean):
                 subs.add(clean)
 
         if not subs:
@@ -42,7 +42,7 @@ class SubfinderDriver(ScannerDriver):
             elif out_file.is_file():
                 for line in read_lines(out_file):
                     clean = line.strip().lower()
-                    if clean and is_in_scope(clean, ctx.config.domain):
+                    if clean and ctx.is_in_scope(clean):
                         subs.add(clean)
 
         clean_subs = sorted(list(subs))
@@ -79,6 +79,14 @@ class HttpxDriver(ScannerDriver):
 
         live_file = ctx.config.outdir / "live.txt"
 
+        ports_spec = getattr(ctx.config, "probe_ports", "default")
+        port_args: List[str] = []
+        if ports_spec and ports_spec != "default":
+            if ports_spec == "web":
+                port_args = ["-ports", "80,443,8000,8008,8080,8443,8888,9000,9090,9443"]
+            else:
+                port_args = ["-ports", ports_spec]
+
         cmd = [
             self.binary_name,
             "-silent",
@@ -86,6 +94,7 @@ class HttpxDriver(ScannerDriver):
             str(sub_file),
             "-mc",
             "200,301,302",
+            *port_args,
             "-o",
             str(live_file),
         ]
@@ -409,7 +418,7 @@ class AssetfinderDriver(ScannerDriver):
         subs: Set[str] = set()
         for line in res.stdout.splitlines():
             clean = line.strip().lower()
-            if clean and is_in_scope(clean, ctx.config.domain):
+            if clean and ctx.is_in_scope(clean):
                 subs.add(clean)
 
         clean_subs = sorted(list(subs))
@@ -440,7 +449,7 @@ class AmassDriver(ScannerDriver):
         subs: Set[str] = set()
         for line in res.stdout.splitlines():
             clean = line.strip().lower()
-            if clean and is_in_scope(clean, ctx.config.domain):
+            if clean and ctx.is_in_scope(clean):
                 subs.add(clean)
 
         clean_subs = sorted(list(subs))
@@ -478,7 +487,7 @@ class Sublist3rDriver(ScannerDriver):
         subs: Set[str] = set()
         for line in lines:
             clean = line.strip().lower()
-            if clean and is_in_scope(clean, ctx.config.domain):
+            if clean and ctx.is_in_scope(clean):
                 subs.add(clean)
 
         clean_subs = sorted(list(subs))
@@ -512,7 +521,7 @@ class WaybackDriver(ScannerDriver):
         if not lines and out_file.is_file():
             lines = [l for l in read_lines(out_file) if l.startswith("http")]
 
-        urls = [u for u in lines if is_in_scope(u, ctx.config.domain)]
+        urls = [u for u in lines if ctx.is_in_scope(u)]
 
         return ScanResult(
             success=res.success,
@@ -541,7 +550,7 @@ class GauDriver(ScannerDriver):
         elif res.stdout.strip():
             lines = [l.strip() for l in res.stdout.splitlines() if l.strip().startswith("http")]
 
-        urls = [u for u in lines if is_in_scope(u, ctx.config.domain)]
+        urls = [u for u in lines if ctx.is_in_scope(u)]
 
         return ScanResult(
             success=res.success,
@@ -577,7 +586,7 @@ class ParamspiderDriver(ScannerDriver):
                 pf = results_dir / f"{domain}.txt"
                 if pf.exists():
                     for line in read_lines(pf):
-                        if "=" in line and line.startswith("http") and is_in_scope(line, ctx.config.domain):
+                        if "=" in line and line.startswith("http") and ctx.is_in_scope(line):
                             urls.append(line.strip())
 
         return ScanResult(

@@ -115,7 +115,7 @@ async def run_urls_stage(ctx: StageContext) -> List[str]:
     # Filter parameterized & in-scope
     valid_param_urls = [
         u for u in all_raw_urls
-        if "=" in u and is_in_scope(u, ctx.config.domain)
+        if "=" in u and ctx.is_in_scope(u)
     ]
 
     inserted = ctx.store.add_urls(valid_param_urls, source="recon_harvest")
