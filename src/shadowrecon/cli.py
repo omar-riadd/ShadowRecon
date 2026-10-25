@@ -37,11 +37,18 @@ from shadowrecon.modules.waf import run_waf_stage
 from shadowrecon.pipeline.queue import AsyncEventBus
 from shadowrecon.pipeline.runner import PipelineRunner, StageContext, StageResult
 from shadowrecon.reporting import (
+    attach_finding_notifier,
+    build_completion_payload,
+    detect_webhook_type,
     export_csv,
     export_json,
+    export_markdown,
+    export_pdf,
     export_sarif,
     generate_report_from_store,
+    send_webhook,
 )
+from shadowrecon.reporting.export import build_manifest_dict
 from shadowrecon.storage.diff import SessionDiff, diff_sessions
 from shadowrecon.storage.session import SessionStore
 
@@ -142,9 +149,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--driver-urls", help="URL harvesting driver(s), comma-separated (e.g. wayback,katana,paramspider or gau,katana)")
     p.add_argument("--no-proxy", action="store_true", help="Disable SOCKS proxy routing")
     p.add_argument("--no-report", action="store_true", help="Skip HTML report generation")
+    p.add_argument("--export-md", dest="export_md", help="Path to export Markdown executive summary report")
+    p.add_argument("--export-pdf", dest="export_pdf", help="Path to export professional PDF executive report")
     p.add_argument("--export-sarif", dest="export_sarif", help="Path to export findings in OASIS SARIF v2.1.0 format")
     p.add_argument("--export-json", dest="export_json", help="Path to export complete session manifest in JSON format")
     p.add_argument("--export-csv", dest="export_csv", help="Directory path to export tabular CSV files")
+    p.add_argument("--webhook", dest="webhook_url", help="Slack, Discord, or generic HTTP webhook URL (or set SHADOWRECON_WEBHOOK_URL)")
+    p.add_argument("--webhook-events", default="complete,critical", help="Comma-separated events to send to webhook: complete, critical (default: complete,critical)")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
     p.add_argument("-y", "--yes", action="store_true", help="Assume yes on interactive prompts")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -207,6 +218,15 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     nuclei_sev = args.nuclei_severity or toml_cfg.get("nuclei_severity", "medium,high,critical")
     nuclei_tags = args.nuclei_tags or toml_cfg.get("nuclei_tags", "")
 
+    export_md_path = Path(args.export_md).resolve() if args.export_md else (
+        Path(toml_cfg["export_md"]).resolve() if toml_cfg.get("export_md") else None
+    )
+    export_pdf_path = Path(args.export_pdf).resolve() if args.export_pdf else (
+        Path(toml_cfg["export_pdf"]).resolve() if toml_cfg.get("export_pdf") else None
+    )
+    webhook_url = args.webhook_url or os.getenv("SHADOWRECON_WEBHOOK_URL") or toml_cfg.get("webhook_url")
+    webhook_events = args.webhook_events or toml_cfg.get("webhook_events", "complete,critical")
+
     # Construct Config
     cfg = Config(
         target=target_url,
@@ -240,6 +260,10 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         driver_nuclei=toml_cfg.get("driver_nuclei", "nuclei"),
         driver_xss=toml_cfg.get("driver_xss", "dalfox"),
         driver_sqli=toml_cfg.get("driver_sqli", "sqlmap"),
+        export_md=export_md_path,
+        export_pdf=export_pdf_path,
+        webhook_url=webhook_url,
+        webhook_events=webhook_events,
     )
 
     # Initialize Proxy Provider
@@ -359,9 +383,27 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     runner.add_stage("vuln_sqli", "SQL injection scanning", run_sqli_stage)
     runner.add_stage("vuln_lfi", "LFI/SSRF payload fuzzing", run_lfi_stage)
 
+    # Real-time finding alert webhook listener
+    notifier_task: Optional[asyncio.Task] = None
+    if cfg.webhook_url and "critical" in cfg.webhook_events:
+        notifier_task = await attach_finding_notifier(
+            bus=bus,
+            webhook_url=cfg.webhook_url,
+            target=cfg.target,
+            min_severity="high",
+        )
+
     # Execute Pipeline
     log.info("Launching execution pipeline ...")
-    results = await runner.run(ctx)
+    try:
+        results = await runner.run(ctx)
+    finally:
+        if notifier_task:
+            await bus.close_topic("finding")
+            try:
+                await asyncio.wait_for(notifier_task, timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                notifier_task.cancel()
 
     # Export flat artifacts for backward compatibility
     store.export_flat_artifacts(cfg.outdir)
@@ -393,18 +435,44 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         "Output Directory": str(cfg.outdir),
     }
 
-    # Generate HTML Report
+    # Generate HTML & Default Markdown Reports
     if cfg.make_report:
         report_path = generate_report_from_store(store, cfg.outdir, report_meta, drift=diff_result)
         log.info("HTML Report generated -> %s", report_path)
+        md_default_path = cfg.outdir / "report.md"
+        export_markdown(store, md_default_path, meta=report_meta, diff=diff_result)
+        log.info("Markdown Report generated -> %s", md_default_path)
 
-    # Enterprise Exports (SARIF, JSON, CSV)
+    # Enterprise Exports (SARIF, JSON, CSV, Markdown, PDF)
     if args.export_sarif:
         export_sarif(store, Path(args.export_sarif))
     if args.export_json:
         export_json(store, Path(args.export_json), meta=report_meta)
     if args.export_csv:
         export_csv(store, Path(args.export_csv))
+    if cfg.export_md:
+        export_markdown(store, cfg.export_md, meta=report_meta, diff=diff_result)
+        log.info("Markdown Report exported -> %s", cfg.export_md)
+    if cfg.export_pdf:
+        export_pdf(store, cfg.export_pdf, meta=report_meta, diff=diff_result)
+        log.info("PDF Report exported -> %s", cfg.export_pdf)
+
+    # Send Completion Webhook Notification
+    if cfg.webhook_url and "complete" in cfg.webhook_events:
+        manifest = build_manifest_dict(store, meta=report_meta)
+        manifest["drift"] = diff_result.to_dict() if diff_result else None
+        status_str = "completed" if all(r.status in ("completed", "resumed", "skipped") for r in results.values()) else "completed_with_warnings"
+        payload = build_completion_payload(
+            target=cfg.target,
+            manifest=manifest,
+            webhook_type=detect_webhook_type(cfg.webhook_url),
+            status=status_str,
+        )
+        wh_ok = await send_webhook(cfg.webhook_url, payload)
+        if wh_ok:
+            log.info("Completion notification sent to webhook successfully.")
+        else:
+            log.warning("Failed to send completion notification to webhook.")
 
     # Print Summary Table
     counts = store.get_summary_counts()
@@ -424,6 +492,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         print(f" JSON Export       : {args.export_json}")
     if args.export_csv:
         print(f" CSV Export Dir    : {args.export_csv}")
+    if cfg.export_md:
+        print(f" Markdown Export   : {cfg.export_md}")
+    if cfg.export_pdf:
+        print(f" PDF Export        : {cfg.export_pdf}")
+    if cfg.webhook_url:
+        print(f" Webhook URL       : {cfg.webhook_url} ({','.join(cfg.webhook_events)})")
     print("=" * 50 + "\n")
 
     # Print Drift Report to console if generated

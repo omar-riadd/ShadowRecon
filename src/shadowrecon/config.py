@@ -94,6 +94,10 @@ class Config:
     driver_nuclei: str = "nuclei"
     driver_xss: str = "dalfox"
     driver_sqli: str = "sqlmap"
+    export_md: Optional[Path] = None
+    export_pdf: Optional[Path] = None
+    webhook_url: Optional[str] = None
+    webhook_events: str = "complete,critical"
 
     @property
     def proxies(self) -> dict:
@@ -165,6 +169,10 @@ TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[A
     "driver_nuclei": (str, None, "Driver for nuclei stage (e.g. 'nuclei')"),
     "driver_xss": (str, None, "Driver for XSS stage (e.g. 'dalfox')"),
     "driver_sqli": (str, None, "Driver for SQLi stage (e.g. 'sqlmap')"),
+    "export_md": (str, None, "Markdown report export path"),
+    "export_pdf": (str, None, "Executive PDF report export path"),
+    "webhook_url": (str, None, "Slack, Discord, or generic webhook URL"),
+    "webhook_events": (str, None, "Comma-separated webhook event triggers (complete, critical)"),
 }
 
 
