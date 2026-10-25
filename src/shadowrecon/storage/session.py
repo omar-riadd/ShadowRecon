@@ -1,6 +1,7 @@
 """SQLite session store for pipeline deduplication, run caching, and artifact export."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -20,10 +21,14 @@ class FindingRecord:
     details: str = ""
     source_tool: str = ""
     timestamp: str = ""
+    fingerprint: str = ""
 
     def __post_init__(self) -> None:
         if not self.timestamp:
             self.timestamp = datetime.now().isoformat()
+        if not self.fingerprint:
+            raw_sig = f"{self.vuln_type.strip().lower()}:{self.target_url.strip().lower()}:{self.payload.strip()}"
+            self.fingerprint = hashlib.sha256(raw_sig.encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass
@@ -98,6 +103,7 @@ class SessionStore:
 
                 CREATE TABLE IF NOT EXISTS findings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT UNIQUE,
                     vuln_type TEXT NOT NULL,
                     severity TEXT NOT NULL,
                     target_url TEXT NOT NULL,
@@ -118,6 +124,13 @@ class SessionStore:
                     created_at TEXT
                 );
             """)
+
+            # Migration check: ensure fingerprint column exists in findings
+            cursor = conn.execute("PRAGMA table_info(findings)")
+            columns = [row["name"] for row in cursor.fetchall()]
+            if "fingerprint" not in columns:
+                conn.execute("ALTER TABLE findings ADD COLUMN fingerprint TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_findings_fingerprint ON findings(fingerprint)")
 
     # ------------------
     #   METADATA
@@ -285,22 +298,28 @@ class SessionStore:
     #   FINDINGS & WAF
     # ------------------
 
-    def add_finding(self, finding: FindingRecord) -> None:
+    def add_finding(self, finding: FindingRecord) -> bool:
+        """Add a finding record, returning True if inserted or False if duplicate."""
         with self._get_connection() as conn:
-            conn.execute(
-                """INSERT INTO findings
-                   (vuln_type, severity, target_url, payload, details, source_tool, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    finding.vuln_type,
-                    finding.severity,
-                    finding.target_url,
-                    finding.payload,
-                    finding.details,
-                    finding.source_tool,
-                    finding.timestamp,
-                ),
-            )
+            try:
+                conn.execute(
+                    """INSERT INTO findings
+                       (fingerprint, vuln_type, severity, target_url, payload, details, source_tool, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        finding.fingerprint,
+                        finding.vuln_type,
+                        finding.severity,
+                        finding.target_url,
+                        finding.payload,
+                        finding.details,
+                        finding.source_tool,
+                        finding.timestamp,
+                    ),
+                )
+                return True
+            except sqlite3.IntegrityError:
+                return False
 
     def get_findings(self) -> List[FindingRecord]:
         with self._get_connection() as conn:
@@ -314,6 +333,7 @@ class SessionStore:
                     details=r["details"] or "",
                     source_tool=r["source_tool"] or "",
                     timestamp=r["created_at"],
+                    fingerprint=r["fingerprint"] if "fingerprint" in r.keys() and r["fingerprint"] else "",
                 )
                 for r in rows
             ]

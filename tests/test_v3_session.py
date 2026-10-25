@@ -132,6 +132,63 @@ class TestV3SessionStore(unittest.TestCase):
         subs_text = (export_dir / "subdomains.txt").read_text(encoding="utf-8")
         self.assertIn("api.example.com", subs_text)
 
+    def test_findings_deduplication_via_fingerprint(self):
+        f1 = FindingRecord(
+            vuln_type="XSS",
+            severity="high",
+            target_url="https://api.example.com/?q=1",
+            payload="<script>alert(1)</script>",
+            source_tool="dalfox",
+        )
+        # Duplicate finding with same vuln_type, target_url, payload, but reported by nuclei
+        f2 = FindingRecord(
+            vuln_type="XSS",
+            severity="medium",
+            target_url="https://api.example.com/?q=1",
+            payload="<script>alert(1)</script>",
+            source_tool="nuclei",
+        )
+        inserted1 = self.store.add_finding(f1)
+        inserted2 = self.store.add_finding(f2)
+        self.assertTrue(inserted1)
+        self.assertFalse(inserted2)
+
+        findings = self.store.get_findings()
+        self.assertEqual(len(findings), 1)
+        self.assertTrue(findings[0].fingerprint)
+        self.assertEqual(findings[0].source_tool, "dalfox")
+
+    def test_schema_migration_adds_fingerprint_to_legacy_db(self):
+        import sqlite3
+        legacy_db = Path(self.tmpdir.name) / "legacy.db"
+        conn = sqlite3.connect(legacy_db)
+        conn.execute("""
+            CREATE TABLE findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                vuln_type TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                target_url TEXT NOT NULL,
+                payload TEXT,
+                details TEXT,
+                source_tool TEXT,
+                created_at TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+        # Opening with SessionStore should migrate and add fingerprint column
+        migrated_store = SessionStore(legacy_db)
+        f = FindingRecord(
+            vuln_type="SQLi",
+            severity="critical",
+            target_url="https://example.com/item?id=1",
+            payload="1' OR '1'='1",
+        )
+        self.assertTrue(migrated_store.add_finding(f))
+        self.assertFalse(migrated_store.add_finding(f))
+        self.assertEqual(len(migrated_store.get_findings()), 1)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
