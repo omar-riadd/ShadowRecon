@@ -643,4 +643,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    src_dir = Path(__file__).resolve().parent / "src"
+    if str(src_dir) not in sys.path:
+        sys.path.insert(0, str(src_dir))
+    from shadowrecon.cli import main as v3_main
+    sys.exit(v3_main())
+

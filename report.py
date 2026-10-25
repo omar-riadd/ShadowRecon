@@ -36,6 +36,15 @@ class Section:
     note: str = ""
 
 
+def _count_ffuf_hits(csv_path: Path) -> int:
+    lines = read_lines(csv_path)
+    if not lines:
+        return 0
+    if "fuzz" in lines[0].lower() or "url" in lines[0].lower():
+        return max(0, len(lines) - 1)
+    return len(lines)
+
+
 def collect(run_dir: Path) -> List[Section]:
     sections: List[Section] = []
     for fname, title, accent in LINE_ARTIFACTS:
@@ -48,13 +57,15 @@ def collect(run_dir: Path) -> List[Section]:
 
     ffuf = run_dir / "ffuf_dirs"
     if ffuf.is_dir():
-        csvs = sorted(p.name for p in ffuf.glob("*.csv"))
-        sections.append(Section("Directory fuzz (FFUF)", "info", len(csvs), csvs))
+        csvs = sorted(ffuf.glob("*.csv"))
+        total_hits = sum(_count_ffuf_hits(p) for p in csvs)
+        sections.append(Section("Directory fuzz (FFUF)", "info", total_hits, [p.name for p in csvs], note=f"across {len(csvs)} host(s)"))
 
     lfi = run_dir / "ffuf_lfi_ssrf"
     if lfi.is_dir():
-        csvs = sorted(p.name for p in lfi.glob("*.csv"))
-        sections.append(Section("LFI/SSRF fuzz (FFUF)", "warn", len(csvs), csvs))
+        csvs = sorted(lfi.glob("*.csv"))
+        total_hits = sum(_count_ffuf_hits(p) for p in csvs)
+        sections.append(Section("LFI/SSRF fuzz (FFUF)", "warn", total_hits, [p.name for p in csvs], note=f"across {len(csvs)} host(s)"))
 
     sqlmap = run_dir / "sqlmap_out"
     if sqlmap.is_dir():
