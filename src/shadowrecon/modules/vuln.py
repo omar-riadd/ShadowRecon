@@ -46,100 +46,20 @@ def parse_dalfox_line(line: str) -> FindingRecord | None:
 
 
 async def run_xss_stage(ctx: StageContext) -> List[FindingRecord]:
-    """Execute Dalfox reflected XSS scanner across harvested parameterized endpoints."""
-    params = ctx.store.get_urls()
-    if not params:
-        log.info("No parameterized URLs available for XSS scanning. Skipping.")
-        return []
-
-    params_file = ctx.config.outdir / "params.txt"
-    params_file.parent.mkdir(parents=True, exist_ok=True)
-    params_file.write_text("\n".join(params) + "\n", encoding="utf-8")
-
+    """Execute XSS scanner driver (default: Dalfox) across harvested parameterized endpoints."""
+    driver = ctx.drivers.get_driver("xss")
+    result = await driver.execute(ctx)
+    findings = result.metadata.get("findings", [])
     out_file = ctx.config.outdir / "xss_dalfox.txt"
-    extra_args = ctx.bypass_context.dalfox_args()
-
-    cmd = [
-        "dalfox",
-        "file",
-        str(params_file),
-        "--only-poc",
-        "--worker",
-        "1",
-        "-o",
-        str(out_file),
-        *extra_args,
-    ]
-
-    res = await ctx.executor.run(cmd, proxy=True, timeout=600)
-
-    findings: List[FindingRecord] = []
-    lines: List[str] = []
-    if out_file.is_file():
-        lines = read_lines(out_file)
-    elif res.stdout.strip():
-        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-
-    for line in lines:
-        f = parse_dalfox_line(line)
-        if f:
-            findings.append(f)
-            ctx.store.add_finding(f)
-            await ctx.bus.publish("finding", f, source="dalfox")
-
-    log.info("Dalfox XSS scan complete: %d vulnerabilities -> %s", len(findings), out_file.name)
+    log.info("XSS scan complete: %d vulnerabilities -> %s", len(findings), out_file.name)
     return findings
 
 
 async def run_sqli_stage(ctx: StageContext) -> List[FindingRecord]:
-    """Execute SQLMap vulnerability scanner against parameterized URLs."""
-    params = ctx.store.get_urls()
-    if not params:
-        log.info("No parameterized URLs available for SQLi scanning. Skipping.")
-        return []
-
-    params_file = ctx.config.outdir / "params.txt"
-    params_file.write_text("\n".join(params) + "\n", encoding="utf-8")
-
-    out_dir = ctx.config.outdir / "sqlmap_out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    extra_args = ctx.bypass_context.sqlmap_args()
-
-    cmd = [
-        "sqlmap",
-        "-m",
-        str(params_file),
-        "--batch",
-        "--random-agent",
-        "--level",
-        "1",
-        "--risk",
-        "1",
-        f"--output-dir={out_dir}",
-        *extra_args,
-    ]
-
-    res = await ctx.executor.run(cmd, proxy=True, timeout=3600)
-
-    # Inspect sqlmap output directory for confirmed targets
-    findings: List[FindingRecord] = []
-    for item in out_dir.iterdir():
-        if item.is_dir() and item.name != "csv":
-            target_host = item.name
-            log_file = item / "log"
-            details = log_file.read_text(errors="replace") if log_file.is_file() else ""
-            if "sqlmap identified the following injection points" in details.lower():
-                f = FindingRecord(
-                    vuln_type="SQLi",
-                    severity="critical",
-                    target_url=f"http://{target_host}/",
-                    details=details[:500],
-                    source_tool="sqlmap",
-                )
-                findings.append(f)
-                ctx.store.add_finding(f)
-                await ctx.bus.publish("finding", f, source="sqlmap")
-
+    """Execute SQL injection scanner driver (default: SQLMap) against parameterized URLs."""
+    driver = ctx.drivers.get_driver("sqli")
+    result = await driver.execute(ctx)
+    findings = result.metadata.get("findings", [])
     log.info("SQLMap scan complete: %d confirmed SQLi targets", len(findings))
     return findings
 

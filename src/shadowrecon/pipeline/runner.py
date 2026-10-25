@@ -67,6 +67,12 @@ class StageContext:
     bypass_context: BypassContext
     rate_limiter: Optional[Any] = None
     proxy_provider: Optional[Any] = None
+    drivers: Optional[Any] = None
+
+    def __post_init__(self) -> None:
+        if self.drivers is None:
+            from shadowrecon.drivers.registry import global_registry
+            self.drivers = global_registry
 
 
 StageCallable = Callable[[StageContext], Coroutine[Any, Any, Any]]

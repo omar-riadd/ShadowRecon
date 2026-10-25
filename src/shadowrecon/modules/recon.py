@@ -16,80 +16,24 @@ log = logging.getLogger("shadowrecon.modules.recon")
 
 
 async def run_subdomains_stage(ctx: StageContext) -> List[str]:
-    """Discover subdomains via subfinder and update session store."""
-    out_file = ctx.config.outdir / "subdomains.txt"
-    out_file.parent.mkdir(parents=True, exist_ok=True)
-
-    cmd = ["subfinder", "-silent", "-d", ctx.config.domain]
-    res = await ctx.executor.run(cmd, proxy=True, timeout=600)
-
-    subs: Set[str] = set()
-    for line in res.stdout.splitlines():
-        clean = line.strip().lower()
-        if clean and is_in_scope(clean, ctx.config.domain):
-            subs.add(clean)
-
-    if not subs:
-        subs.add(ctx.config.domain.lower())
-
-    ctx.store.add_subdomains(subs, source="subfinder")
+    """Discover subdomains via configured driver (default: subfinder) and update session store."""
+    driver = ctx.drivers.get_driver("subdomains")
+    await driver.execute(ctx)
     stored_subs = ctx.store.get_subdomains()
-
-    out_file.write_text("\n".join(stored_subs) + "\n", encoding="utf-8")
+    out_file = ctx.config.outdir / "subdomains.txt"
     log.info("Subdomains discovered: %d -> %s", len(stored_subs), out_file.name)
-
-    for sub in stored_subs:
-        await ctx.bus.publish("subdomain", sub, source="subfinder")
     await ctx.bus.close_topic("subdomain")
-
     return stored_subs
 
 
 async def run_probing_stage(ctx: StageContext) -> List[str]:
-    """Probe subdomains for live HTTP/HTTPS services via httpx-toolkit."""
-    subs = ctx.store.get_subdomains()
-    if not subs:
-        subs = [ctx.config.domain]
-
-    subs_file = ctx.config.outdir / "subdomains.txt"
-    subs_file.write_text("\n".join(subs) + "\n", encoding="utf-8")
-
-    out_file = ctx.config.outdir / "live.txt"
-    httpx_bin = resolve_binary("httpx")
-
-    cmd = [
-        httpx_bin,
-        "-silent",
-        "-l",
-        str(subs_file),
-        "-mc",
-        "200,301,302",
-        "-o",
-        str(out_file),
-    ]
-
-    res = await ctx.executor.run(cmd, proxy=True, timeout=900)
-
-    # In dry-run or if output file was written, read live hosts
-    live_hosts: List[str] = []
-    if out_file.is_file():
-        live_hosts = read_lines(out_file)
-    elif res.stdout.strip():
-        live_hosts = [l.strip() for l in res.stdout.splitlines() if l.strip().startswith("http")]
-
-    # If dry run and no output, simulate target
-    if not live_hosts and ctx.config.dry_run:
-        live_hosts = [ctx.config.target.rstrip("/")]
-        out_file.write_text(live_hosts[0] + "\n", encoding="utf-8")
-
-    ctx.store.add_hosts([HostRecord(url=h) for h in live_hosts])
+    """Probe subdomains for live HTTP/HTTPS services via configured driver (default: httpx)."""
+    driver = ctx.drivers.get_driver("probing")
+    await driver.execute(ctx)
     stored_hosts = ctx.store.get_hosts()
+    out_file = ctx.config.outdir / "live.txt"
     log.info("Live hosts identified: %d -> %s", len(stored_hosts), out_file.name)
-
-    for host in stored_hosts:
-        await ctx.bus.publish("host", host, source="httpx")
     await ctx.bus.close_topic("host")
-
     return stored_hosts
 
 
@@ -104,17 +48,18 @@ async def harvest_wayback(ctx: StageContext) -> List[str]:
 
 
 async def harvest_katana(ctx: StageContext, live_file: Path) -> List[str]:
-    """Crawl live endpoints using katana if available."""
-    katana_bin = resolve_binary("katana")
-    if not shutil.which(katana_bin) and not Path(katana_bin).is_file():
+    """Crawl live endpoints using katana driver if available."""
+    try:
+        driver = ctx.drivers.get_driver("crawling")
+        if not driver.is_available() and not ctx.config.dry_run:
+            return []
+        res = await driver.execute(ctx, live_file=live_file)
+        urls = res.metadata.get("urls", [])
+        log.info("Katana crawler discovered %d URLs", len(urls))
+        return urls
+    except Exception as exc:
+        log.warning("Katana crawler encountered error: %s", exc)
         return []
-
-    out_file = ctx.config.outdir / "katana.txt"
-    cmd = [katana_bin, "-list", str(live_file), "-silent", "-jc", "-kf", "all"]
-    res = await ctx.executor.run(cmd, proxy=True, timeout=900, capture_to=out_file)
-    urls = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("http")]
-    log.info("Katana crawler discovered %d URLs", len(urls))
-    return urls
 
 
 async def harvest_paramspider(ctx: StageContext, live_file: Path) -> List[str]:

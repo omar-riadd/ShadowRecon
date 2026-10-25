@@ -15,12 +15,15 @@ def parse_target(url: str) -> str:
 
 
 def in_scope(url: str, domain: str) -> bool:
-    """Verify that a target URL belongs to the authorized domain or its subdomains.
+    """Verify that a target URL or hostname belongs to the authorized domain or its subdomains.
 
     Strict guardrail used to prevent requests escaping to third-party endpoints.
     """
     try:
-        host = (urlparse(url).hostname or "").lower()
+        clean = url.strip()
+        if "://" not in clean:
+            clean = f"http://{clean}"
+        host = (urlparse(clean).hostname or "").lower()
     except ValueError:
         return False
     domain = domain.lower()

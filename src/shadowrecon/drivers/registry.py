@@ -51,5 +51,25 @@ class DriverRegistry:
         return {s: list(drivers.keys()) for s, drivers in self._drivers.items()}
 
 
-# Global default registry instance
+def register_defaults(reg: DriverRegistry) -> None:
+    """Register default concrete scanner drivers into the specified registry."""
+    from shadowrecon.drivers.tools import (
+        DalfoxDriver,
+        HttpxDriver,
+        KatanaDriver,
+        NucleiDriver,
+        SqlmapDriver,
+        SubfinderDriver,
+    )
+
+    reg.register("subdomains", SubfinderDriver(), is_default=True)
+    reg.register("probing", HttpxDriver(), is_default=True)
+    reg.register("crawling", KatanaDriver(), is_default=True)
+    reg.register("nuclei", NucleiDriver(), is_default=True)
+    reg.register("xss", DalfoxDriver(), is_default=True)
+    reg.register("sqli", SqlmapDriver(), is_default=True)
+
+
+# Global default registry instance populated with default concrete tools
 global_registry = DriverRegistry()
+register_defaults(global_registry)

@@ -19,6 +19,7 @@ from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorPr
 from shadowrecon.core.ratelimit import AdaptiveRateLimiter
 from shadowrecon.core.scope import parse_target, slugify
 from shadowrecon.core.tor import TorManager
+from shadowrecon.drivers import global_registry
 from shadowrecon.modules.recon import (
     run_fuzzing_stage,
     run_probing_stage,
@@ -230,6 +231,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         nuclei_templates=nuclei_tmpl,
         nuclei_severity=nuclei_sev,
         nuclei_tags=nuclei_tags,
+        driver_subdomains=toml_cfg.get("driver_subdomains", "subfinder"),
+        driver_probing=toml_cfg.get("driver_probing", "httpx"),
+        driver_crawling=toml_cfg.get("driver_crawling", "katana"),
+        driver_nuclei=toml_cfg.get("driver_nuclei", "nuclei"),
+        driver_xss=toml_cfg.get("driver_xss", "dalfox"),
+        driver_sqli=toml_cfg.get("driver_sqli", "sqlmap"),
     )
 
     # Initialize Proxy Provider
@@ -297,6 +304,18 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     bus = AsyncEventBus()
     bypass_ctx = BypassContext()
 
+    # Configure active drivers from configuration
+    for stage_key, driver_name in [
+        ("subdomains", cfg.driver_subdomains),
+        ("probing", cfg.driver_probing),
+        ("crawling", cfg.driver_crawling),
+        ("nuclei", cfg.driver_nuclei),
+        ("xss", cfg.driver_xss),
+        ("sqli", cfg.driver_sqli),
+    ]:
+        if driver_name in global_registry.list_drivers(stage_key).get(stage_key, []):
+            global_registry.set_active(stage_key, driver_name)
+
     ctx = StageContext(
         config=cfg,
         store=store,
@@ -306,6 +325,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         bypass_context=bypass_ctx,
         rate_limiter=rate_limiter,
         proxy_provider=proxy_provider,
+        drivers=global_registry,
     )
 
     # Stage Lifecycle Callbacks

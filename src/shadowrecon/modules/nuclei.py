@@ -59,67 +59,13 @@ def parse_nuclei_json_line(line: str) -> Optional[FindingRecord]:
 
 async def run_nuclei_stage(ctx: StageContext) -> List[FindingRecord]:
     """Execute full Nuclei vulnerability scan with CVSS severity and tag filters."""
-    if not ctx.config.nuclei_templates.is_dir():
-        if not ctx.config.dry_run:
-            log.warning(
-                "Nuclei templates directory not found at '%s'. Skipping Nuclei scan stage. "
-                "(Run 'nuclei -ut' to download official templates)",
-                ctx.config.nuclei_templates,
-            )
-            return []
-        log.debug("Nuclei templates directory '%s' simulated in dry-run mode.", ctx.config.nuclei_templates)
-
-    hosts = ctx.store.get_hosts()
-    if not hosts:
-        log.info("No live hosts available for Nuclei scanning. Skipping.")
-        return []
-
-    live_file = ctx.config.outdir / "live.txt"
-    live_file.parent.mkdir(parents=True, exist_ok=True)
-    live_file.write_text("\n".join(hosts) + "\n", encoding="utf-8")
-
-    out_file = ctx.config.outdir / "nuclei_findings.jsonl"
-    cmd = [
-        "nuclei",
-        "-l",
-        str(live_file),
-        "-t",
-        str(ctx.config.nuclei_templates),
-        "-jsonl",
-        "-o",
-        str(out_file),
-        "-timeout",
-        "50",
-        "-silent",
-    ]
-
-    # Add CVSS severity filtering
-    if ctx.config.nuclei_severity:
-        cmd.extend(["-s", ctx.config.nuclei_severity])
-
-    # Add template tag filtering if specified
-    if ctx.config.nuclei_tags:
-        cmd.extend(["-tags", ctx.config.nuclei_tags])
-
-    res = await ctx.executor.run(cmd, proxy=True, timeout=3600)
-
-    findings: List[FindingRecord] = []
-    lines: List[str] = []
-    if out_file.is_file():
-        lines = read_lines(out_file)
-    elif res.stdout.strip():
-        lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-
-    for line in lines:
-        record = parse_nuclei_json_line(line)
-        if record:
-            findings.append(record)
-            ctx.store.add_finding(record)
-            await ctx.bus.publish("finding", record, source="nuclei")
-
+    driver = ctx.drivers.get_driver("nuclei")
+    result = await driver.execute(ctx)
+    findings = result.metadata.get("findings", [])
     log.info(
         "Nuclei vulnerability scan complete: %d findings recorded (severities: %s)",
         len(findings),
         ctx.config.nuclei_severity or "all",
     )
     return findings
+
