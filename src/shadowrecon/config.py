@@ -47,6 +47,18 @@ class BypassContext:
             args.extend(["-H", f"{k}: {v}"])
         return args
 
+    def nuclei_args(self) -> List[str]:
+        args = []
+        for k, v in self.headers.items():
+            args.extend(["-H", f"{k}: {v}"])
+        return args
+
+    def httpx_args(self) -> List[str]:
+        args = []
+        for k, v in self.headers.items():
+            args.extend(["-H", f"{k}: {v}"])
+        return args
+
 
 def default_nuclei_templates_dir() -> Path:
     """Find default nuclei templates directory, checking ~/.local/nuclei-templates (v3) or ~/nuclei-templates."""
@@ -104,10 +116,16 @@ class Config:
     probe_ports: str = "default"
     exclude: str = ""
     safe_mode: bool = False
+    concurrency: int = 3
+
+    def __post_init__(self) -> None:
+        if self.safe_mode:
+            self.concurrency = 1
 
     @property
     def proxies(self) -> dict:
         return {"http": self.tor_socks, "https": self.tor_socks}
+
 
 
 class ConfigValidationError(ValueError):
@@ -186,7 +204,9 @@ TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[A
     "ports": (str, None, "Probing ports specification (alias for probe_ports)"),
     "exclude": (str, None, "Comma-separated target exclusion patterns or CIDRs (e.g. 'mail.*,vpn.*,10.0.0.0/8')"),
     "safe_mode": (bool, None, "Enable production safe-mode guardrails"),
+    "concurrency": (int, lambda v: v >= 1, "Concurrency level for parallel stage/driver execution (>= 1)"),
 }
+
 
 
 def validate_toml_config(cfg: Dict[str, Any]) -> Dict[str, Any]:

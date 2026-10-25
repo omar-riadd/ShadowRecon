@@ -51,9 +51,47 @@ class TestV3WafModule(unittest.IsolatedAsyncioTestCase):
 
             bypass = await run_waf_stage(ctx)
             self.assertIsInstance(bypass, BypassContext)
-            # In dry-run, baseline probe returns 200 (not blocked), candidate bypasses logged
+            # In dry-run, baseline probe returns 200 (not blocked), so candidate mutations logged but desc stays none
+            self.assertEqual(bypass.desc, "none")
             bypasses = store.get_waf_bypasses()
             self.assertTrue(len(bypasses) > 0)
+            self.assertTrue(all(not b.get("confirmed") for b in bypasses))
+
+    async def test_run_waf_stage_confirmed_bypass(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            cfg = Config(
+                target="https://example.com/",
+                domain="example.com",
+                wordlist=tmp / "wl.txt",
+                outdir=tmp / "out",
+                dry_run=False,
+                use_proxy=False,
+            )
+            store = SessionStore(tmp / "session.db")
+            executor = AsyncExecutor(dry_run=True, use_proxy=False)
+            bus = AsyncEventBus()
+            tor = TorManager(dry_run=True)
+            ctx = StageContext(cfg, store, executor, bus, tor, BypassContext())
+
+            # Baseline probe returns 403 (blocked), mutations: first returns 403, second returns 200
+            responses = [(403, 100), (403, 100), (200, 500)]
+            resp_iter = iter(responses)
+
+            async def fake_execute_probe(*args, **kwargs):
+                try:
+                    return next(resp_iter)
+                except StopIteration:
+                    return (403, 100)
+
+            with patch("shadowrecon.modules.waf.detect_waf", return_value="Cloudflare"), \
+                 patch("shadowrecon.modules.waf.execute_http_probe", side_effect=fake_execute_probe):
+                bypass = await run_waf_stage(ctx)
+                self.assertNotEqual(bypass.desc, "none")
+                bypasses = store.get_waf_bypasses()
+                confirmed = [b for b in bypasses if b.get("confirmed")]
+                self.assertTrue(len(confirmed) > 0)
 
 
 class TestV3ReconModule(unittest.IsolatedAsyncioTestCase):

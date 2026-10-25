@@ -56,17 +56,28 @@ def inject_native_proxy(cmd: Sequence[str], socks_url: str) -> List[str]:
     full_cmd = list(cmd)
     tool = Path(full_cmd[0]).name
 
-    # Check tool and append its native proxy flag
+    # Check tool and append its native proxy flag (prevent duplicate flags if already passed)
     if tool in ("httpx", "httpx-toolkit"):
-        return [full_cmd[0], "-http-proxy", socks_url, *full_cmd[1:]]
-    if tool in ("ffuf", "curl"):
-        return [full_cmd[0], "-x", socks_url, *full_cmd[1:]]
-    if tool == "nuclei":
-        return [full_cmd[0], "-proxy-socks-url", socks_url, *full_cmd[1:]]
-    if tool in ("dalfox", "paramspider", "katana", "gau"):
-        return [full_cmd[0], "--proxy", socks_url, *full_cmd[1:]]
-    if tool == "sqlmap":
-        return [full_cmd[0], f"--proxy={socks_url}", *full_cmd[1:]]
+        if "-http-proxy" not in full_cmd:
+            return [full_cmd[0], "-http-proxy", socks_url, *full_cmd[1:]]
+    elif tool == "subfinder":
+        if "-proxy" not in full_cmd:
+            return [full_cmd[0], "-proxy", socks_url, *full_cmd[1:]]
+    elif tool == "wafw00f":
+        if "-p" not in full_cmd and "--proxy" not in full_cmd:
+            return [full_cmd[0], "-p", socks_url, *full_cmd[1:]]
+    elif tool in ("ffuf", "curl"):
+        if "-x" not in full_cmd:
+            return [full_cmd[0], "-x", socks_url, *full_cmd[1:]]
+    elif tool == "nuclei":
+        if "-proxy-socks-url" not in full_cmd:
+            return [full_cmd[0], "-proxy-socks-url", socks_url, *full_cmd[1:]]
+    elif tool in ("dalfox", "paramspider", "katana", "gau"):
+        if "--proxy" not in full_cmd and "-proxy" not in full_cmd:
+            return [full_cmd[0], "--proxy", socks_url, *full_cmd[1:]]
+    elif tool == "sqlmap":
+        if not any(arg.startswith("--proxy") for arg in full_cmd):
+            return [full_cmd[0], f"--proxy={socks_url}", *full_cmd[1:]]
 
     return full_cmd
 
@@ -80,11 +91,13 @@ class AsyncExecutor:
         use_proxy: bool = True,
         dry_run: bool = False,
         proxy_provider: Optional[Any] = None,
+        circuit_breaker: Optional[Any] = None,
     ) -> None:
         self.socks_proxy = socks_proxy
         self.use_proxy = use_proxy
         self.dry_run = dry_run
         self.proxy_provider = proxy_provider
+        self.circuit_breaker = circuit_breaker
 
     async def run(
         self,
@@ -100,10 +113,17 @@ class AsyncExecutor:
         tool_resolved = resolve_binary(args[0])
         cmd = [tool_resolved, *args[1:]]
 
+        sub_env = os.environ.copy()
         if proxy and self.use_proxy:
             active_proxy = self.proxy_provider.get_proxy_url() if self.proxy_provider else self.socks_proxy
             if active_proxy:
                 cmd = inject_native_proxy(cmd, active_proxy)
+                sub_env["ALL_PROXY"] = active_proxy
+                sub_env["HTTP_PROXY"] = active_proxy
+                sub_env["HTTPS_PROXY"] = active_proxy
+                sub_env["all_proxy"] = active_proxy
+                sub_env["http_proxy"] = active_proxy
+                sub_env["https_proxy"] = active_proxy
 
         printable = " ".join(cmd)
         log.info("$ %s", printable)
@@ -117,6 +137,7 @@ class AsyncExecutor:
                 *cmd[1:],
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=sub_env,
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
@@ -129,6 +150,19 @@ class AsyncExecutor:
                 log.debug("[%s stderr] %s", Path(cmd[0]).name, stderr.strip())
             if code != 0:
                 log.warning("%s exited with status %d", Path(cmd[0]).name, code)
+                if self.circuit_breaker:
+                    err_lower = stderr.lower()
+                    if any(k in err_lower for k in ("connection refused", "timeout", "no route to host", "504 gateway")):
+                        for arg in args:
+                            if "://" in arg or (arg.count(".") >= 2 and not arg.endswith(".txt")):
+                                self.circuit_breaker.record_failure(arg, stderr.strip()[:100])
+                                break
+
+            # Rate-limit feedback loop: rotate proxy provider if blocks detected
+            combined_out = (stderr + " " + stdout).lower()
+            if self.proxy_provider and any(k in combined_out for k in ("429 too many requests", "rate limit exceeded", "tor blocked", "captcha")):
+                log.warning("Detected rate-limit block in tool output. Requesting proxy rotation ...")
+                await self.proxy_provider.rotate()
 
             if capture_to is not None:
                 capture_to.parent.mkdir(parents=True, exist_ok=True)
@@ -141,4 +175,9 @@ class AsyncExecutor:
             return ProcessResult(returncode=127, stdout="", stderr="command not found", command=cmd)
         except asyncio.TimeoutError:
             log.warning("Tool execution timed out after %ds: %s", timeout, printable)
+            if self.circuit_breaker:
+                for arg in args:
+                    if "://" in arg or (arg.count(".") >= 2 and not arg.endswith(".txt")):
+                        self.circuit_breaker.record_failure(arg, f"Command execution timed out after {timeout}s")
+                        break
             return ProcessResult(returncode=124, stdout="", stderr="timeout", command=cmd)

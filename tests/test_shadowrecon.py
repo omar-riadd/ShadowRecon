@@ -7,7 +7,10 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+repo_root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(repo_root))
+sys.path.insert(0, str(repo_root / "src"))
+
 
 import report
 import utils
@@ -60,6 +63,17 @@ class TestWafRegistry(unittest.TestCase):
     def test_registry_keys_are_strings(self):
         for key in waf_payloads.BYPASS:
             self.assertIsInstance(key, str)
+
+    def test_package_and_shim_waf_payloads_parity(self):
+        from shadowrecon import waf_payloads as pkg_waf
+        self.assertEqual(set(waf_payloads.BYPASS.keys()), set(pkg_waf.BYPASS.keys()))
+        for key, builder in waf_payloads.BYPASS.items():
+            pkg_builder = pkg_waf.BYPASS[key]
+            self.assertEqual(builder("https://example.com/"), pkg_builder("https://example.com/"))
+        self.assertEqual(
+            waf_payloads.default_payloads("https://example.com/"),
+            pkg_waf.default_payloads("https://example.com/"),
+        )
 
 
 class TestReport(unittest.TestCase):
@@ -155,7 +169,32 @@ class TestResolveHttpx(unittest.TestCase):
         self.assertIn(binary, ("httpx-toolkit", "httpx", str(Path.home() / "go" / "bin" / "httpx")))
 
 
+class TestConsole(unittest.TestCase):
+    def test_console_import_and_status_card(self):
+        import console
+        from shadowrecon import console as pkg_console
+
+        card = pkg_console.format_status_card(
+            target="https://example.com/",
+            domain="example.com",
+            proxy_name="tor",
+            proxy_url="socks5://127.0.0.1:9050",
+            cb_stats={"healthy_hosts": 4, "tripped_hosts": 1, "probing_hosts": 0, "tripped_list": ["dead.example.com"]},
+            stage_durations={"waf": 0.05, "subdomains": 0.10},
+            findings_count=2,
+        )
+        self.assertIn("example.com", card)
+        self.assertIn("Proxy Provider   : tor", card)
+        self.assertIn("4 Healthy | 1 Tripped", card)
+        self.assertIn("dead.example.com", card)
+        self.assertIn("Findings Recorded: 2", card)
+
+        self.assertEqual(callable(console.banner), callable(pkg_console.banner))
+        self.assertEqual(callable(console.summary_table), callable(pkg_console.summary_table))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
 
 

@@ -231,6 +231,13 @@ class TestPhase2DriverExecution(unittest.TestCase):
                 self.assertEqual(captured_cmd[0], "paramspider")
                 urls = res.metadata.get("urls", [])
                 self.assertIn("https://example.com/api?key=secret", urls)
+                # Verify output file was moved to outdir/paramspider
+                expected_dest = self.outdir / "paramspider" / "example.com.txt"
+                self.assertTrue(expected_dest.is_file())
+                self.assertIn(expected_dest, res.output_files)
+                # Verify CWD results folder was cleaned up
+                self.assertFalse(res_file.exists())
+                self.assertFalse(results_dir.exists())
             finally:
                 if res_file.exists():
                     res_file.unlink()
@@ -238,6 +245,7 @@ class TestPhase2DriverExecution(unittest.TestCase):
                     results_dir.rmdir()
 
         asyncio.run(run_test())
+
 
 
 class TestMultiDriverAggregation(unittest.TestCase):

@@ -27,14 +27,19 @@ class AsyncEventBus:
         self._subscribers: Dict[str, Set[asyncio.Queue[Optional[Event]]]] = {}
         self._all_events: List[Event] = []
         self._closed: bool = False
+        self._closed_topics: Set[str] = set()
 
     def subscribe(self, topic: str = "*") -> asyncio.Queue[Optional[Event]]:
         """Subscribe to a specific topic or '*' for all topics."""
         q: asyncio.Queue[Optional[Event]] = asyncio.Queue()
+        if self._closed or topic in self._closed_topics:
+            q.put_nowait(None)
+            return q
         if topic not in self._subscribers:
             self._subscribers[topic] = set()
         self._subscribers[topic].add(q)
         return q
+
 
     def unsubscribe(self, queue: asyncio.Queue[Optional[Event]], topic: str = "*") -> None:
         """Unsubscribe a queue from a topic."""
@@ -74,9 +79,15 @@ class AsyncEventBus:
 
     async def close_topic(self, topic: str) -> None:
         """Signal completion of a topic to its direct subscribers."""
+        self._closed_topics.add(topic)
         if topic in self._subscribers:
             for q in list(self._subscribers[topic]):
                 await q.put(None)
+
+    def reopen_topic(self, topic: str) -> None:
+        """Reopen a previously closed topic to allow new publishers/subscribers."""
+        self._closed_topics.discard(topic)
+
 
     async def close(self) -> None:
         """Close event bus and notify all listeners with sentinel."""

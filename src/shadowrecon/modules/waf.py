@@ -8,8 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 from requests.exceptions import RequestException
-
-import waf_payloads
+from shadowrecon import waf_payloads
 from shadowrecon.config import BypassContext, Config
 from shadowrecon.core.scope import is_in_scope
 from shadowrecon.pipeline.runner import StageContext
@@ -86,13 +85,28 @@ async def execute_http_probe(
     headers: Optional[Dict[str, str]] = None,
     data: Optional[Any] = None,
 ) -> Tuple[int, int]:
-    """Asynchronously probe an HTTP endpoint with adaptive rate-limiting and proxy routing."""
+    """Asynchronously probe an HTTP endpoint with adaptive rate-limiting, circuit-breaking, and proxy routing."""
+    if ctx.circuit_breaker and not ctx.circuit_breaker.allow_request(url):
+        log.warning("Fast-failing probe to '%s' (host circuit is OPEN)", url)
+        raise ConnectionError(f"Host circuit tripped (OPEN) for {url}")
+
     if ctx.rate_limiter:
         await ctx.rate_limiter.acquire()
 
-    code, body_len = await asyncio.to_thread(
-        _sync_http_request, ctx.config, method, url, headers, data, ctx.proxy_provider
-    )
+    try:
+        code, body_len = await asyncio.to_thread(
+            _sync_http_request, ctx.config, method, url, headers, data, ctx.proxy_provider
+        )
+    except Exception as exc:
+        if ctx.circuit_breaker:
+            ctx.circuit_breaker.record_failure(url, str(exc))
+        raise
+
+    if ctx.circuit_breaker:
+        if code in (502, 503, 504):
+            ctx.circuit_breaker.record_failure(url, f"HTTP {code}")
+        elif code < 500:
+            ctx.circuit_breaker.record_success(url)
 
     if ctx.rate_limiter:
         ctx.rate_limiter.record_response(code)
@@ -178,7 +192,7 @@ async def run_waf_stage(ctx: StageContext) -> BypassContext:
                 best_bypass = BypassContext(headers=headers, method_override=method, desc=desc)
 
         elif candidate:
-            log.info("  [Candidate bypass] %s -> %d", desc, status_code)
+            log.info("  [Candidate mutation] %s -> %d", desc, status_code)
             ctx.store.add_waf_bypass(
                 desc=desc,
                 method=method,
@@ -187,14 +201,15 @@ async def run_waf_stage(ctx: StageContext) -> BypassContext:
                 status_code=status_code,
                 confirmed=False,
             )
-            if best_bypass is None:
-                best_bypass = BypassContext(headers=headers, method_override=method, desc=desc)
 
     if best_bypass is not None:
         ctx.bypass_context = best_bypass
-        log.info("Propagating bypass context to scanners: %s (%s)", best_bypass.desc, best_bypass.headers)
+        log.info("Propagating confirmed WAF bypass to scanners: %s (%s)", best_bypass.desc, best_bypass.headers)
     else:
-        log.info("No WAF bypass identified; continuing with standard requests.")
+        if not baseline_blocked:
+            log.info("Target did not block active baseline probe; no WAF bypass required.")
+        else:
+            log.info("Target blocked baseline probe, but no bypass mutation succeeded; continuing with standard requests.")
 
     await ctx.bus.publish(
         "waf",

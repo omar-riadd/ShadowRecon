@@ -75,6 +75,14 @@ class TestV3Executor(unittest.TestCase):
             ["httpx-toolkit", "-http-proxy", proxy, "-silent"],
         )
         self.assertEqual(
+            inject_native_proxy(["subfinder", "-d", "example.com"], proxy),
+            ["subfinder", "-proxy", proxy, "-d", "example.com"],
+        )
+        self.assertEqual(
+            inject_native_proxy(["wafw00f", "https://example.com"], proxy),
+            ["wafw00f", "-p", proxy, "https://example.com"],
+        )
+        self.assertEqual(
             inject_native_proxy(["nuclei", "-t", "cves"], proxy),
             ["nuclei", "-proxy-socks-url", proxy, "-t", "cves"],
         )
@@ -86,6 +94,38 @@ class TestV3Executor(unittest.TestCase):
             inject_native_proxy(["sqlmap", "-u", "http://x"], proxy),
             ["sqlmap", f"--proxy={proxy}", "-u", "http://x"],
         )
+
+    def test_inject_native_proxy_no_duplicates(self):
+        proxy = "socks5://127.0.0.1:9050"
+        self.assertEqual(
+            inject_native_proxy(["subfinder", "-proxy", proxy, "-d", "example.com"], proxy),
+            ["subfinder", "-proxy", proxy, "-d", "example.com"],
+        )
+        self.assertEqual(
+            inject_native_proxy(["wafw00f", "-p", proxy, "https://example.com"], proxy),
+            ["wafw00f", "-p", proxy, "https://example.com"],
+        )
+
+    def test_async_executor_subprocess_env_injection(self):
+        from unittest.mock import AsyncMock
+        executor = AsyncExecutor(socks_proxy="socks5://127.0.0.1:9050", use_proxy=True)
+        captured_env = {}
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            nonlocal captured_env
+            captured_env = kwargs.get("env", {})
+            mock_proc = MagicMock()
+            mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+            mock_proc.returncode = 0
+            return mock_proc
+
+        with patch("asyncio.create_subprocess_exec", side_effect=fake_create_subprocess_exec):
+            res = asyncio.run(executor.run(["echo", "hello"], proxy=True))
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("ALL_PROXY", captured_env)
+            self.assertEqual(captured_env["ALL_PROXY"], "socks5://127.0.0.1:9050")
+            self.assertEqual(captured_env["HTTP_PROXY"], "socks5://127.0.0.1:9050")
+            self.assertEqual(captured_env["HTTPS_PROXY"], "socks5://127.0.0.1:9050")
 
     def test_async_executor_dry_run(self):
         executor = AsyncExecutor(dry_run=True)
@@ -99,6 +139,8 @@ class TestV3Config(unittest.TestCase):
         ctx = BypassContext(headers={"X-Forwarded-For": "127.0.0.1"})
         self.assertEqual(ctx.dalfox_args(), ["--header", "X-Forwarded-For: 127.0.0.1"])
         self.assertEqual(ctx.ffuf_args(), ["-H", "X-Forwarded-For: 127.0.0.1"])
+        self.assertEqual(ctx.nuclei_args(), ["-H", "X-Forwarded-For: 127.0.0.1"])
+        self.assertEqual(ctx.httpx_args(), ["-H", "X-Forwarded-For: 127.0.0.1"])
         self.assertEqual(ctx.sqlmap_args(), ["--headers", "X-Forwarded-For: 127.0.0.1"])
 
     def test_load_toml_config(self):

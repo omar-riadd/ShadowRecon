@@ -27,10 +27,8 @@ shadowrecon-diff = "shadowrecon.storage.diff:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools]
-py-modules = ["main", "utils", "report", "console", "waf_payloads"]
-
 [tool.bandit]
+
 # B404/B603 are expected: this tool invokes external recon binaries by design,
 # always with shell=False and validated inputs. See the inline nosec notes.
 skips = ["B404"]

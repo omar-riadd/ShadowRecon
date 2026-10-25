@@ -1,16 +1,18 @@
 """Reconnaissance stages: subdomains, HTTP probing, URL gathering, and fuzzing."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import shutil
 from pathlib import Path
-from typing import List, Set
+from typing import Any, Callable, Coroutine, List, Optional, Set
 
 from shadowrecon.core.executor import resolve_binary
 from shadowrecon.core.scope import is_in_scope, read_lines, slugify
 from shadowrecon.pipeline.runner import StageContext
 from shadowrecon.storage.session import HostRecord
+
 
 log = logging.getLogger("shadowrecon.modules.recon")
 
@@ -26,16 +28,26 @@ async def run_subdomains_stage(ctx: StageContext) -> List[str]:
         )
         driver_names = [active.name]
 
-    for d_name in driver_names:
-        try:
-            driver = ctx.drivers.get_driver("subdomains", d_name)
-            if driver.is_available() or ctx.config.dry_run:
-                log.info("Executing subdomain driver: %s", driver.name)
-                await driver.execute(ctx)
-            else:
-                log.warning("Subdomain driver '%s' not available on system, skipping.", d_name)
-        except Exception as exc:
-            log.warning("Driver '%s' failed in subdomains stage: %s", d_name, exc)
+    concurrency = max(1, getattr(ctx.config, "concurrency", 1))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _run_subdomain_driver(d_name: str) -> None:
+        async with sem:
+            try:
+                driver = ctx.drivers.get_driver("subdomains", d_name)
+                if driver.is_available() or ctx.config.dry_run:
+                    log.info("Executing subdomain driver: %s", driver.name)
+                    await driver.execute(ctx)
+                else:
+                    log.warning("Subdomain driver '%s' not available on system, skipping.", d_name)
+            except Exception as exc:
+                log.warning("Driver '%s' failed in subdomains stage: %s", d_name, exc)
+
+    if len(driver_names) == 1 or concurrency == 1:
+        for d_name in driver_names:
+            await _run_subdomain_driver(d_name)
+    else:
+        await asyncio.gather(*[_run_subdomain_driver(d) for d in driver_names])
 
     stored_subs = ctx.store.get_subdomains()
     out_file = ctx.config.outdir / "subdomains.txt"
@@ -51,8 +63,32 @@ async def run_probing_stage(ctx: StageContext) -> List[str]:
     stored_hosts = ctx.store.get_hosts()
     out_file = ctx.config.outdir / "live.txt"
     log.info("Live hosts identified: %d -> %s", len(stored_hosts), out_file.name)
+    for h in stored_hosts:
+        await ctx.bus.publish("host_live", h, source="probing")
     await ctx.bus.close_topic("host")
+    await ctx.bus.close_topic("host_live")
     return stored_hosts
+
+
+async def consume_live_hosts_stream(
+    ctx: StageContext,
+    callback: Callable[[str], Coroutine[Any, Any, None]],
+    queue: Optional[asyncio.Queue[Optional[Event]]] = None,
+) -> None:
+    """Incrementally consume 'host_live' events from the event bus as they are emitted."""
+    if queue is not None:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if item.data and isinstance(item.data, str):
+                await callback(item.data)
+    else:
+        async for event in ctx.bus.stream("host_live"):
+            if event.data and isinstance(event.data, str):
+                await callback(event.data)
+
+
 
 
 async def harvest_wayback(ctx: StageContext) -> List[str]:
@@ -88,9 +124,9 @@ async def harvest_paramspider(ctx: StageContext, live_file: Path) -> List[str]:
         return []
 
 
-async def run_urls_stage(ctx: StageContext) -> List[str]:
+async def run_urls_stage(ctx: StageContext, live_file: Optional[Path] = None) -> List[str]:
     """Harvest and deduplicate parameterized endpoints across configured URL drivers."""
-    live_file = ctx.config.outdir / "live.txt"
+    target_live_file = live_file or (ctx.config.outdir / "live.txt")
     all_raw_urls: List[str] = []
 
     # Get configured URL harvesting drivers (e.g. "wayback,katana,paramspider" or "gau,katana")
@@ -98,19 +134,33 @@ async def run_urls_stage(ctx: StageContext) -> List[str]:
     if not driver_names:
         driver_names = ["wayback", "katana", "paramspider"]
 
-    for d_name in driver_names:
-        try:
-            driver = ctx.drivers.get_driver("urls", d_name)
-            if not driver.is_available() and not ctx.config.dry_run:
-                log.info("URL driver '%s' not installed/available, skipping.", d_name)
-                continue
-            log.info("Executing URL harvesting driver: %s", driver.name)
-            res = await driver.execute(ctx, live_file=live_file)
-            urls = res.metadata.get("urls", [])
-            log.info("Driver '%s' discovered %d URLs", driver.name, len(urls))
+    concurrency = max(1, getattr(ctx.config, "concurrency", 1))
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _run_single_url_driver(d_name: str) -> List[str]:
+        async with sem:
+            try:
+                driver = ctx.drivers.get_driver("urls", d_name)
+                if not driver.is_available() and not ctx.config.dry_run:
+                    log.info("URL driver '%s' not installed/available, skipping.", d_name)
+                    return []
+                log.info("Executing URL harvesting driver: %s", driver.name)
+                res = await driver.execute(ctx, live_file=target_live_file)
+                urls = res.metadata.get("urls", [])
+                log.info("Driver '%s' discovered %d URLs", driver.name, len(urls))
+                return urls
+            except Exception as exc:
+                log.warning("URL driver '%s' encountered error: %s", d_name, exc)
+                return []
+
+    if len(driver_names) == 1 or concurrency == 1:
+        for d in driver_names:
+            urls = await _run_single_url_driver(d)
             all_raw_urls.extend(urls)
-        except Exception as exc:
-            log.warning("URL driver '%s' encountered error: %s", d_name, exc)
+    else:
+        results = await asyncio.gather(*[_run_single_url_driver(d) for d in driver_names])
+        for urls in results:
+            all_raw_urls.extend(urls)
 
     # Filter parameterized & in-scope
     valid_param_urls = [
@@ -128,9 +178,13 @@ async def run_urls_stage(ctx: StageContext) -> List[str]:
 
     for u in stored_urls:
         await ctx.bus.publish("url", u, source="recon")
+        if "=" in u:
+            await ctx.bus.publish("param_url", u, source="recon")
     await ctx.bus.close_topic("url")
+    await ctx.bus.close_topic("param_url")
 
     return stored_urls
+
 
 
 async def run_fuzzing_stage(ctx: StageContext) -> None:

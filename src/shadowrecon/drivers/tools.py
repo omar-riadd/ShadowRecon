@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -87,6 +88,7 @@ class HttpxDriver(ScannerDriver):
             else:
                 port_args = ["-ports", ports_spec]
 
+        extra_args = ctx.bypass_context.httpx_args() if ctx.bypass_context else []
         cmd = [
             self.binary_name,
             "-silent",
@@ -95,6 +97,7 @@ class HttpxDriver(ScannerDriver):
             "-mc",
             "200,301,302",
             *port_args,
+            *extra_args,
             "-o",
             str(live_file),
         ]
@@ -111,10 +114,16 @@ class HttpxDriver(ScannerDriver):
             hosts = [ctx.config.target.rstrip("/")]
             live_file.write_text(hosts[0] + "\n", encoding="utf-8")
 
+        if ctx.circuit_breaker:
+            for h in hosts:
+                ctx.circuit_breaker.record_success(h)
+
         host_records = [HostRecord(url=h, status_code=200) for h in hosts]
         ctx.store.add_hosts(host_records)
         for h in hosts:
             await ctx.bus.publish("host", h, source=self.name)
+            await ctx.bus.publish("host_live", h, source=self.name)
+
 
         return ScanResult(
             success=res.success,
@@ -136,6 +145,15 @@ class KatanaDriver(ScannerDriver):
         target_file = live_file or (ctx.config.outdir / "live.txt")
         if not target_file.is_file() and not ctx.config.dry_run:
             return ScanResult(success=True, items_count=0, error="Live hosts file not found for Katana crawler")
+
+        if ctx.circuit_breaker and target_file.is_file():
+            raw_hosts = read_lines(target_file)
+            healthy_hosts = ctx.circuit_breaker.filter_healthy_urls(raw_hosts)
+            if len(healthy_hosts) != len(raw_hosts):
+                log.info("Circuit breaker filtered %d dead hosts for Katana", len(raw_hosts) - len(healthy_hosts))
+                filtered_file = ctx.config.outdir / "live_healthy_katana.txt"
+                filtered_file.write_text("\n".join(healthy_hosts) + "\n", encoding="utf-8")
+                target_file = filtered_file
 
         out_file = ctx.config.outdir / "katana.txt"
         cmd = [
@@ -181,6 +199,12 @@ class NucleiDriver(ScannerDriver):
                 )
 
         hosts = ctx.store.get_hosts()
+        if ctx.circuit_breaker:
+            healthy_hosts = ctx.circuit_breaker.filter_healthy_urls(hosts)
+            if len(healthy_hosts) != len(hosts):
+                log.info("Circuit breaker filtered %d dead hosts for Nuclei", len(hosts) - len(healthy_hosts))
+                hosts = healthy_hosts
+
         if not hosts and not ctx.config.dry_run:
             log.info("No live hosts available for Nuclei scanning. Skipping.")
             return ScanResult(success=True, items_count=0, metadata={"findings": []})
@@ -210,6 +234,8 @@ class NucleiDriver(ScannerDriver):
             cmd.extend(["-s", ctx.config.nuclei_severity])
         if ctx.config.nuclei_tags:
             cmd.extend(["-tags", ctx.config.nuclei_tags])
+        if ctx.bypass_context:
+            cmd.extend(ctx.bypass_context.nuclei_args())
 
         res = await ctx.executor.run(cmd, proxy=True, timeout=3600)
 
@@ -245,8 +271,11 @@ class DalfoxDriver(ScannerDriver):
 
     async def execute(self, ctx: StageContext, params_file: Optional[Path] = None, **kwargs: Any) -> ScanResult:
         params = ctx.store.get_urls()
+        if ctx.circuit_breaker:
+            params = ctx.circuit_breaker.filter_healthy_urls(params)
+
         if not params and not ctx.config.dry_run:
-            log.info("No parameterized URLs available for XSS scanning. Skipping.")
+            log.info("No parameterized URLs available on healthy hosts for XSS scanning. Skipping.")
             return ScanResult(success=True, items_count=0, metadata={"findings": []})
 
         target_file = params_file or (ctx.config.outdir / "params.txt")
@@ -349,8 +378,11 @@ class SqlmapDriver(ScannerDriver):
 
         # Batch mode scanning against parameterized URLs
         params = ctx.store.get_urls()
+        if ctx.circuit_breaker:
+            params = ctx.circuit_breaker.filter_healthy_urls(params)
+
         if not params and not ctx.config.dry_run:
-            log.info("No parameterized URLs available for SQLi scanning. Skipping.")
+            log.info("No parameterized URLs available on healthy hosts for SQLi scanning. Skipping.")
             return ScanResult(success=True, items_count=0, metadata={"findings": []})
 
         target_file = params_file or (ctx.config.outdir / "params.txt")
@@ -573,10 +605,21 @@ class ParamspiderDriver(ScannerDriver):
         if not target_file.is_file() and not ctx.config.dry_run:
             return ScanResult(success=True, items_count=0, error="Live hosts file not found for ParamSpider")
 
+        if ctx.circuit_breaker and target_file.is_file():
+            raw_hosts = read_lines(target_file)
+            healthy = ctx.circuit_breaker.filter_healthy_urls(raw_hosts)
+            if len(healthy) != len(raw_hosts):
+                log.info("Circuit breaker filtered %d dead hosts for ParamSpider", len(raw_hosts) - len(healthy))
+                filtered_file = ctx.config.outdir / "live_healthy_paramspider.txt"
+                filtered_file.write_text("\n".join(healthy) + "\n", encoding="utf-8")
+                target_file = filtered_file
+
         cmd = [self.binary_name, "--list", str(target_file), "--proxy", ctx.config.tor_socks]
         res = await ctx.executor.run(cmd, proxy=False, timeout=900)
 
         results_dir = Path("results")
+        target_param_dir = ctx.config.outdir / "paramspider"
+        output_files: List[Path] = []
         urls: List[str] = []
 
         if target_file.is_file():
@@ -585,15 +628,35 @@ class ParamspiderDriver(ScannerDriver):
                 domain = re.sub(r"^https?://", "", host).lower().strip().rstrip("/")
                 pf = results_dir / f"{domain}.txt"
                 if pf.exists():
+                    target_param_dir.mkdir(parents=True, exist_ok=True)
+                    dest_file = target_param_dir / f"{domain}.txt"
+                    try:
+                        shutil.copy2(pf, dest_file)
+                        output_files.append(dest_file)
+                    except Exception as e:
+                        log.debug("Failed copying ParamSpider output %s -> %s: %s", pf, dest_file, e)
                     for line in read_lines(pf):
                         if "=" in line and line.startswith("http") and ctx.is_in_scope(line):
                             urls.append(line.strip())
+                    try:
+                        pf.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+
+        if results_dir.exists():
+            try:
+                if not any(results_dir.iterdir()):
+                    results_dir.rmdir()
+            except Exception as e:
+                log.debug("Could not clean up temporary results_dir %s: %s", results_dir, e)
 
         return ScanResult(
             success=res.success,
+            output_files=output_files,
             items_count=len(urls),
             raw_output=res.stdout,
             error=res.stderr if not res.success else "",
             metadata={"urls": urls},
         )
+
 

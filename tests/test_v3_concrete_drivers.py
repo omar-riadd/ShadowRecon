@@ -203,6 +203,43 @@ class TestConcreteDriverExecution(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_httpx_driver_with_bypass_headers(self) -> None:
+        async def run_test() -> None:
+            self.ctx.bypass_context = BypassContext(headers={"X-Forwarded-For": "127.0.0.1"})
+            driver = HttpxDriver()
+            captured_cmd = []
+
+            async def fake_run(cmd, **kwargs):
+                captured_cmd.extend(cmd)
+                return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+            self.ctx.executor.run = AsyncMock(side_effect=fake_run)
+            await driver.execute(self.ctx)
+
+            self.assertIn("-H", captured_cmd)
+            self.assertIn("X-Forwarded-For: 127.0.0.1", captured_cmd)
+
+        asyncio.run(run_test())
+
+    def test_nuclei_driver_with_bypass_headers(self) -> None:
+        async def run_test() -> None:
+            self.store.add_hosts(["https://example.com"])
+            self.ctx.bypass_context = BypassContext(headers={"X-Forwarded-For": "127.0.0.1"})
+            driver = NucleiDriver()
+            captured_cmd = []
+
+            async def fake_run(cmd, **kwargs):
+                captured_cmd.extend(cmd)
+                return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+            self.ctx.executor.run = AsyncMock(side_effect=fake_run)
+            await driver.execute(self.ctx)
+
+            self.assertIn("-H", captured_cmd)
+            self.assertIn("X-Forwarded-For: 127.0.0.1", captured_cmd)
+
+        asyncio.run(run_test())
+
     def test_dalfox_driver(self) -> None:
         async def run_test() -> None:
             self.store.add_urls(["https://example.com/search?q=1"], source="test")

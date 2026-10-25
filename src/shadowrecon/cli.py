@@ -165,8 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--circuit-recovery", type=float, default=30.0, help="Circuit recovery cool-down window in seconds (default: 30.0)")
     p.add_argument("--ports", "--probe-ports", dest="probe_ports", default="default", help="HTTP probing port matrix: 'default' (80,443), 'web' (80,443,8000,8080,8443,8888,9000,9443), or custom list (default: default)")
     p.add_argument("--exclude", default="", help="Comma-separated target exclusion patterns or CIDRs (e.g. 'mail.*,vpn.*,10.0.0.0/8')")
-    p.add_argument("--safe-mode", action="store_true", help="Enable production safety guardrails (clamp concurrency to 2, delay >= 0.5s, non-destructive scans)")
+    p.add_argument("--safe-mode", action="store_true", help="Enable production safety guardrails (lock concurrency to 1, delay >= 0.5s, non-destructive scans)")
+    p.add_argument("--concurrency", type=int, default=3, help="Maximum concurrent driver / stage tasks (default: 3; locked to 1 in safe-mode)")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
+
     p.add_argument("-y", "--yes", action="store_true", help="Assume yes on interactive prompts")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     p.add_argument("--version", action="version", version=f"ShadowRecon {__version__}")
@@ -250,12 +252,14 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
 
     rate_limit = args.rate_limit if args.rate_limit != 0.0 else toml_cfg.get("rate_limit", 0.0)
     ffuf_threads = args.threads if args.threads != 5 else toml_cfg.get("threads", toml_cfg.get("ffuf_threads", 5))
+    concurrency = args.concurrency if args.concurrency != 3 else toml_cfg.get("concurrency", 3)
 
     if safe_mode:
+        concurrency = 1
         ffuf_threads = min(ffuf_threads, 2)
         rate_limit = max(rate_limit, 0.5)
         log.warning(
-            "[SAFE MODE ENGAGED] Production guardrails active: FFUF threads clamped to %d, request delay >= %.1fs, non-destructive scanners enforced",
+            "[SAFE MODE ENGAGED] Production guardrails active: concurrency locked to 1, FFUF threads clamped to %d, request delay >= %.1fs, non-destructive scanners enforced",
             ffuf_threads,
             rate_limit,
         )
@@ -288,6 +292,8 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         nuclei_templates=nuclei_tmpl,
         nuclei_severity=nuclei_sev,
         nuclei_tags=nuclei_tags,
+        concurrency=concurrency,
+
         driver_subdomains=args.driver_subdomains or toml_cfg.get("driver_subdomains", "subfinder"),
         driver_probing=toml_cfg.get("driver_probing", "httpx"),
         driver_crawling=toml_cfg.get("driver_crawling", "katana"),
@@ -376,6 +382,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         use_proxy=cfg.use_proxy,
         dry_run=cfg.dry_run,
         proxy_provider=proxy_provider,
+        circuit_breaker=cb,
     )
     bus = AsyncEventBus()
     bypass_ctx = BypassContext()
@@ -533,8 +540,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     for k, v in counts.items():
         print(f" {k:<28} : {v}")
     print("=" * 50)
+    print(f" Target URL        : {cfg.target}")
+    active_proxy_str = proxy_provider.get_proxy_url() or "direct"
+    print(f" Proxy Provider    : {proxy_provider.provider_name} ({active_proxy_str})")
     print(f" SQLite Session DB : {db_path}")
     print(f" Artifacts Directory: {cfg.outdir}")
+
     if diff_result:
         print(f" Drift Summary     : {cfg.outdir / 'drift_summary.json'}")
     if args.export_sarif:

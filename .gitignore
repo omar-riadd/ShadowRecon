@@ -1,7 +1,9 @@
 # Run artifacts & reports
 runs/
 run_*/
+results/
 demo_report/
+
 *.html
 200-ok.txt
 *_raw.txt

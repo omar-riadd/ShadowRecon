@@ -262,6 +262,82 @@ class TestHealthAndCircuitBreaker(unittest.TestCase):
 
         asyncio.run(_test())
 
+    # -------------------------------------------------------------------------
+    # Runtime Circuit Breaker Wiring & Proxy Rotation Tests (Phase 2)
+    # -------------------------------------------------------------------------
+    def test_waf_probe_circuit_breaker_wiring(self) -> None:
+        from shadowrecon.modules.waf import execute_http_probe
+        from shadowrecon.core.circuit import HostCircuitBreaker
+
+        async def _test() -> None:
+            cb = HostCircuitBreaker(failure_threshold=2, recovery_timeout=60.0)
+            ctx = StageContext(
+                config=self.cfg,
+                store=self.store,
+                executor=AsyncExecutor(dry_run=True),
+                bus=AsyncEventBus(),
+                tor=TorManager(dry_run=True),
+                bypass_context=BypassContext(),
+                circuit_breaker=cb,
+            )
+
+            # Mock _sync_http_request to simulate repeated 504 Gateway Timeouts
+            with patch("shadowrecon.modules.waf._sync_http_request", return_value=(504, 0)):
+                # Failure 1
+                await execute_http_probe(ctx, "GET", "https://dead-host.com/")
+                self.assertTrue(cb.allow_request("https://dead-host.com/"))
+
+                # Failure 2 -> Threshold reached -> Circuit trips to OPEN
+                await execute_http_probe(ctx, "GET", "https://dead-host.com/")
+                self.assertFalse(cb.allow_request("https://dead-host.com/"))
+                self.assertIn("dead-host.com", cb.get_open_circuits())
+
+                # Probe 3 should fast-fail with ConnectionError without calling _sync_http_request
+                with self.assertRaises(ConnectionError) as cm:
+                    await execute_http_probe(ctx, "GET", "https://dead-host.com/")
+                self.assertIn("circuit tripped", str(cm.exception))
+
+        asyncio.run(_test())
+
+    def test_async_executor_rate_limit_rotation_and_timeout_circuit(self) -> None:
+        from shadowrecon.core.circuit import HostCircuitBreaker
+        from unittest.mock import AsyncMock
+
+        async def _test() -> None:
+            cb = HostCircuitBreaker(failure_threshold=1)
+            mock_proxy = MagicMock()
+            mock_proxy.get_proxy_url.return_value = "socks5://127.0.0.1:9050"
+            mock_proxy.rotate = AsyncMock()
+
+            executor = AsyncExecutor(
+                socks_proxy="socks5://127.0.0.1:9050",
+                use_proxy=True,
+                dry_run=False,
+                proxy_provider=mock_proxy,
+                circuit_breaker=cb,
+            )
+
+            # Test 1: Rate limit 429 detection triggers proxy rotation
+            mock_proc = MagicMock()
+            mock_proc.communicate = AsyncMock(return_value=(b"", b"HTTP 429 Too Many Requests: rate limit exceeded"))
+            mock_proc.returncode = 1
+
+            with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+                res = await executor.run(["curl", "https://example.com/api"])
+                self.assertEqual(res.returncode, 1)
+                mock_proxy.rotate.assert_awaited_once()
+
+            # Test 2: Timeout records failure on host in circuit breaker
+            async def timeout_subproc(*args, **kwargs):
+                raise asyncio.TimeoutError()
+
+            with patch("asyncio.create_subprocess_exec", side_effect=timeout_subproc):
+                res = await executor.run(["ffuf", "-u", "https://timeout-host.com/FUZZ"], timeout=1)
+                self.assertEqual(res.returncode, 124)
+                self.assertFalse(cb.allow_request("https://timeout-host.com/"))
+
+        asyncio.run(_test())
+
 
 if __name__ == "__main__":
     unittest.main()
