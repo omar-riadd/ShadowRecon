@@ -143,6 +143,29 @@ class TestV3ReconModule(unittest.IsolatedAsyncioTestCase):
         await run_fuzzing_stage(self.ctx)
         self.assertTrue((self.cfg.outdir / "ffuf_dirs").is_dir())
 
+    async def test_fuzzing_stage_multi_host_concurrency(self):
+        from unittest.mock import AsyncMock
+        from shadowrecon.core.executor import ProcessResult
+        self.cfg.concurrency = 3
+        self.store.add_hosts(["https://api.example.com", "https://app.example.com", "https://dev.example.com"])
+
+        executed_cmds = []
+        async def fake_run(cmd, **kwargs):
+            executed_cmds.append(cmd)
+            out_idx = cmd.index("-o")
+            out_file = Path(cmd[out_idx + 1])
+            out_file.write_text("url,status\n", encoding="utf-8")
+            return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+        self.ctx.executor.run = AsyncMock(side_effect=fake_run)
+        await run_fuzzing_stage(self.ctx)
+
+        ffuf_dir = self.cfg.outdir / "ffuf_dirs"
+        self.assertTrue(ffuf_dir.is_dir())
+        self.assertEqual(len(executed_cmds), 3)
+        csvs = list(ffuf_dir.glob("*.csv"))
+        self.assertEqual(len(csvs), 3)
+
 
 class TestV3TakeoverModule(unittest.IsolatedAsyncioTestCase):
     def test_find_takeover_templates(self):

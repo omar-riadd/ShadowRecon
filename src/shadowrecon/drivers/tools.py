@@ -285,6 +285,7 @@ class DalfoxDriver(ScannerDriver):
 
         out_file = ctx.config.outdir / "xss_dalfox.txt"
 
+        workers = 1 if ctx.config.safe_mode else max(1, min(getattr(ctx.config, "concurrency", 1), 5))
         extra_args = ctx.bypass_context.dalfox_args() if ctx.bypass_context else []
         cmd = [
             self.binary_name,
@@ -292,7 +293,7 @@ class DalfoxDriver(ScannerDriver):
             str(target_file),
             "--only-poc",
             "--worker",
-            "1",
+            str(workers),
             "-o",
             str(out_file),
             *extra_args,
@@ -351,6 +352,8 @@ class SqlmapDriver(ScannerDriver):
                 "1",
                 "--risk",
                 "1",
+                "--timeout=15",
+                "--retries=1",
                 *extra_args,
             ]
             res = await ctx.executor.run(cmd, proxy=True, timeout=600)
@@ -385,6 +388,11 @@ class SqlmapDriver(ScannerDriver):
             log.info("No parameterized URLs available on healthy hosts for SQLi scanning. Skipping.")
             return ScanResult(success=True, items_count=0, metadata={"findings": []})
 
+        # Limit batch size to top 50 unique parameter templates to prevent hanging
+        if len(params) > 50:
+            log.info("Truncating SQLMap batch from %d to top 50 parameterized URLs", len(params))
+            params = params[:50]
+
         target_file = params_file or (ctx.config.outdir / "params.txt")
         target_file.parent.mkdir(parents=True, exist_ok=True)
         if params:
@@ -403,6 +411,8 @@ class SqlmapDriver(ScannerDriver):
             "1",
             "--risk",
             "1",
+            "--timeout=15",
+            "--retries=1",
             f"--output-dir={out_dir}",
             *extra_args,
         ]

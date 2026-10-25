@@ -205,25 +205,34 @@ async def run_fuzzing_stage(ctx: StageContext) -> None:
     ffuf_dir.mkdir(parents=True, exist_ok=True)
 
     extra_args = ctx.bypass_context.ffuf_args()
+    concurrency = 1 if ctx.config.safe_mode else max(1, getattr(ctx.config, "concurrency", 1))
+    sem = asyncio.Semaphore(concurrency)
 
-    for host in hosts:
-        out_csv = ffuf_dir / f"{slugify(host)}.csv"
-        cmd = [
-            "ffuf",
-            "-w",
-            str(ctx.config.wordlist),
-            "-u",
-            f"{host.rstrip('/')}/FUZZ",
-            "-mc",
-            "200,301,302",
-            "-of",
-            "csv",
-            "-o",
-            str(out_csv),
-            "-t",
-            str(ctx.config.ffuf_threads),
-            *extra_args,
-        ]
-        await ctx.executor.run(cmd, proxy=True, timeout=900)
+    async def _fuzz_host(host: str) -> None:
+        async with sem:
+            out_csv = ffuf_dir / f"{slugify(host)}.csv"
+            cmd = [
+                "ffuf",
+                "-w",
+                str(ctx.config.wordlist),
+                "-u",
+                f"{host.rstrip('/')}/FUZZ",
+                "-mc",
+                "200,301,302",
+                "-of",
+                "csv",
+                "-o",
+                str(out_csv),
+                "-t",
+                str(ctx.config.ffuf_threads),
+                *extra_args,
+            ]
+            await ctx.executor.run(cmd, proxy=True, timeout=900)
+
+    if len(hosts) == 1 or concurrency == 1:
+        for host in hosts:
+            await _fuzz_host(host)
+    else:
+        await asyncio.gather(*[_fuzz_host(h) for h in hosts])
 
     log.info("FFUF directory fuzzing complete -> %s", ffuf_dir.name)

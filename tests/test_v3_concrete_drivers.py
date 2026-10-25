@@ -266,6 +266,40 @@ class TestConcreteDriverExecution(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_dalfox_worker_concurrency_scaling_and_safe_mode(self) -> None:
+        async def run_test() -> None:
+            self.store.add_urls(["https://example.com/search?q=1"], source="test")
+            driver = DalfoxDriver()
+
+            # 1. With concurrency=4
+            self.ctx.config.concurrency = 4
+            self.ctx.config.safe_mode = False
+            captured_cmd_1 = []
+
+            async def fake_run_1(cmd, **kwargs):
+                captured_cmd_1.extend(cmd)
+                return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+            self.ctx.executor.run = AsyncMock(side_effect=fake_run_1)
+            await driver.execute(self.ctx)
+            idx_1 = captured_cmd_1.index("--worker")
+            self.assertEqual(captured_cmd_1[idx_1 + 1], "4")
+
+            # 2. With safe_mode=True (should clamp to 1)
+            self.ctx.config.safe_mode = True
+            captured_cmd_2 = []
+
+            async def fake_run_2(cmd, **kwargs):
+                captured_cmd_2.extend(cmd)
+                return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+            self.ctx.executor.run = AsyncMock(side_effect=fake_run_2)
+            await driver.execute(self.ctx)
+            idx_2 = captured_cmd_2.index("--worker")
+            self.assertEqual(captured_cmd_2[idx_2 + 1], "1")
+
+        asyncio.run(run_test())
+
     def test_sqlmap_driver_single_and_batch(self) -> None:
         async def run_test() -> None:
             driver = SqlmapDriver()
@@ -288,9 +322,39 @@ class TestConcreteDriverExecution(unittest.TestCase):
             self.assertTrue(res.success)
             self.assertEqual(captured_cmd[0], "sqlmap")
             self.assertIn("-u", captured_cmd)
+            self.assertIn("--timeout=15", captured_cmd)
+            self.assertIn("--retries=1", captured_cmd)
             findings = self.store.get_findings()
             self.assertEqual(len(findings), 1)
             self.assertEqual(findings[0].vuln_type, "SQLi")
+
+        asyncio.run(run_test())
+
+    def test_sqlmap_batch_chunking_and_timeout_flags(self) -> None:
+        async def run_test() -> None:
+            driver = SqlmapDriver()
+            # Seed 60 URLs to verify truncation to top 50
+            urls = [f"https://example.com/item?id={i}&type=test" for i in range(60)]
+            self.store.add_urls(urls)
+
+            captured_cmd = []
+
+            async def fake_run_batch(cmd, **kwargs):
+                captured_cmd.extend(cmd)
+                return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
+
+            self.ctx.executor.run = AsyncMock(side_effect=fake_run_batch)
+            res = await driver.execute(self.ctx)
+
+            self.assertTrue(res.success)
+            self.assertIn("--timeout=15", captured_cmd)
+            self.assertIn("--retries=1", captured_cmd)
+            self.assertIn("-m", captured_cmd)
+
+            # Check that written file had at most 50 URLs
+            params_file = self.ctx.config.outdir / "params.txt"
+            written_lines = [l for l in params_file.read_text(encoding="utf-8").splitlines() if l.strip()]
+            self.assertLessEqual(len(written_lines), 50)
 
         asyncio.run(run_test())
 
