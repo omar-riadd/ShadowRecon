@@ -138,6 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="Simulate execution without sending live packets")
     p.add_argument("--proxy-provider", default="tor", choices=["tor", "pool", "direct"], help="Proxy provider to use (default: tor)")
     p.add_argument("--proxy-pool", dest="proxy_pool_file", help="Path to file containing rotating proxy URLs")
+    p.add_argument("--driver-subdomains", help="Subdomain enumeration driver(s), comma-separated (e.g. subfinder,assetfinder,amass)")
+    p.add_argument("--driver-urls", help="URL harvesting driver(s), comma-separated (e.g. wayback,katana,paramspider or gau,katana)")
     p.add_argument("--no-proxy", action="store_true", help="Disable SOCKS proxy routing")
     p.add_argument("--no-report", action="store_true", help="Skip HTML report generation")
     p.add_argument("--export-sarif", dest="export_sarif", help="Path to export findings in OASIS SARIF v2.1.0 format")
@@ -231,9 +233,10 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         nuclei_templates=nuclei_tmpl,
         nuclei_severity=nuclei_sev,
         nuclei_tags=nuclei_tags,
-        driver_subdomains=toml_cfg.get("driver_subdomains", "subfinder"),
+        driver_subdomains=args.driver_subdomains or toml_cfg.get("driver_subdomains", "subfinder"),
         driver_probing=toml_cfg.get("driver_probing", "httpx"),
         driver_crawling=toml_cfg.get("driver_crawling", "katana"),
+        driver_urls=args.driver_urls or toml_cfg.get("driver_urls", "wayback,katana,paramspider"),
         driver_nuclei=toml_cfg.get("driver_nuclei", "nuclei"),
         driver_xss=toml_cfg.get("driver_xss", "dalfox"),
         driver_sqli=toml_cfg.get("driver_sqli", "sqlmap"),
@@ -313,7 +316,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         ("xss", cfg.driver_xss),
         ("sqli", cfg.driver_sqli),
     ]:
-        if driver_name in global_registry.list_drivers(stage_key).get(stage_key, []):
+        if "," not in driver_name and driver_name in global_registry.list_drivers(stage_key).get(stage_key, []):
             global_registry.set_active(stage_key, driver_name)
 
     ctx = StageContext(

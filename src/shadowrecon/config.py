@@ -90,6 +90,7 @@ class Config:
     driver_subdomains: str = "subfinder"
     driver_probing: str = "httpx"
     driver_crawling: str = "katana"
+    driver_urls: str = "wayback,katana,paramspider"
     driver_nuclei: str = "nuclei"
     driver_xss: str = "dalfox"
     driver_sqli: str = "sqlmap"
@@ -157,9 +158,10 @@ TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[A
     "export_json": (str, None, "JSON export path"),
     "export_csv": (str, None, "CSV export directory"),
     "diff": (str, None, "Prior session.db path for diffing"),
-    "driver_subdomains": (str, None, "Driver for subdomains stage (e.g. 'subfinder')"),
+    "driver_subdomains": (str, None, "Driver(s) for subdomains stage (e.g. 'subfinder' or 'subfinder,assetfinder')"),
     "driver_probing": (str, None, "Driver for probing stage (e.g. 'httpx')"),
     "driver_crawling": (str, None, "Driver for crawling stage (e.g. 'katana')"),
+    "driver_urls": (str, None, "Driver(s) for URL gathering stage (e.g. 'wayback,katana,paramspider' or 'gau,katana')"),
     "driver_nuclei": (str, None, "Driver for nuclei stage (e.g. 'nuclei')"),
     "driver_xss": (str, None, "Driver for XSS stage (e.g. 'dalfox')"),
     "driver_sqli": (str, None, "Driver for SQLi stage (e.g. 'sqlmap')"),

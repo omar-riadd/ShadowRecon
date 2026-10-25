@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -393,3 +394,197 @@ class SqlmapDriver(ScannerDriver):
             error=res.stderr if not res.success else "",
             metadata={"findings": findings},
         )
+
+
+class AssetfinderDriver(ScannerDriver):
+    """Concrete driver for tomnomnom assetfinder passive subdomain enumeration."""
+
+    def __init__(self, binary_name: str = "assetfinder") -> None:
+        super().__init__(name="assetfinder", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, **kwargs: Any) -> ScanResult:
+        cmd = [self.binary_name, "-subs-only", ctx.config.domain]
+        res = await ctx.executor.run(cmd, proxy=True, timeout=600)
+
+        subs: Set[str] = set()
+        for line in res.stdout.splitlines():
+            clean = line.strip().lower()
+            if clean and is_in_scope(clean, ctx.config.domain):
+                subs.add(clean)
+
+        clean_subs = sorted(list(subs))
+        if clean_subs:
+            ctx.store.add_subdomains(clean_subs, source=self.name)
+            for sub in clean_subs:
+                await ctx.bus.publish("subdomain", sub, source=self.name)
+
+        return ScanResult(
+            success=res.success,
+            items_count=len(clean_subs),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"subdomains": clean_subs},
+        )
+
+
+class AmassDriver(ScannerDriver):
+    """Concrete driver for OWASP Amass passive attack surface mapping & subdomain enumeration."""
+
+    def __init__(self, binary_name: str = "amass") -> None:
+        super().__init__(name="amass", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, **kwargs: Any) -> ScanResult:
+        cmd = [self.binary_name, "enum", "-silent", "-d", ctx.config.domain]
+        res = await ctx.executor.run(cmd, proxy=True, timeout=1200)
+
+        subs: Set[str] = set()
+        for line in res.stdout.splitlines():
+            clean = line.strip().lower()
+            if clean and is_in_scope(clean, ctx.config.domain):
+                subs.add(clean)
+
+        clean_subs = sorted(list(subs))
+        if clean_subs:
+            ctx.store.add_subdomains(clean_subs, source=self.name)
+            for sub in clean_subs:
+                await ctx.bus.publish("subdomain", sub, source=self.name)
+
+        return ScanResult(
+            success=res.success,
+            items_count=len(clean_subs),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"subdomains": clean_subs},
+        )
+
+
+class Sublist3rDriver(ScannerDriver):
+    """Concrete driver for sublist3r OSINT search engine subdomain discovery."""
+
+    def __init__(self, binary_name: str = "sublist3r") -> None:
+        super().__init__(name="sublist3r", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, **kwargs: Any) -> ScanResult:
+        out_file = ctx.config.outdir / "sublist3r_out.txt"
+        cmd = [self.binary_name, "-d", ctx.config.domain, "-n", "-o", str(out_file)]
+        res = await ctx.executor.run(cmd, proxy=True, timeout=900)
+
+        lines: List[str] = []
+        if out_file.is_file():
+            lines = read_lines(out_file)
+        elif res.stdout.strip():
+            lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+
+        subs: Set[str] = set()
+        for line in lines:
+            clean = line.strip().lower()
+            if clean and is_in_scope(clean, ctx.config.domain):
+                subs.add(clean)
+
+        clean_subs = sorted(list(subs))
+        if clean_subs:
+            ctx.store.add_subdomains(clean_subs, source=self.name)
+            for sub in clean_subs:
+                await ctx.bus.publish("subdomain", sub, source=self.name)
+
+        return ScanResult(
+            success=res.success,
+            output_files=[out_file] if out_file.is_file() else [],
+            items_count=len(clean_subs),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"subdomains": clean_subs},
+        )
+
+
+class WaybackDriver(ScannerDriver):
+    """Concrete driver for waybackpy Wayback Machine archive URL harvest."""
+
+    def __init__(self, binary_name: str = "waybackpy") -> None:
+        super().__init__(name="wayback", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, **kwargs: Any) -> ScanResult:
+        out_file = ctx.config.outdir / "wayback.txt"
+        cmd = [self.binary_name, "--url", ctx.config.domain, "-sub", "-ku"]
+        res = await ctx.executor.run(cmd, proxy=True, timeout=900, capture_to=out_file)
+
+        lines = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("http")]
+        if not lines and out_file.is_file():
+            lines = [l for l in read_lines(out_file) if l.startswith("http")]
+
+        urls = [u for u in lines if is_in_scope(u, ctx.config.domain)]
+
+        return ScanResult(
+            success=res.success,
+            output_files=[out_file] if out_file.is_file() else [],
+            items_count=len(urls),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"urls": urls},
+        )
+
+
+class GauDriver(ScannerDriver):
+    """Concrete driver for lc/gau (GetAllUrls) multi-provider URL miner."""
+
+    def __init__(self, binary_name: str = "gau") -> None:
+        super().__init__(name="gau", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, **kwargs: Any) -> ScanResult:
+        out_file = ctx.config.outdir / "gau.txt"
+        cmd = [self.binary_name, "--subs", ctx.config.domain, "--o", str(out_file)]
+        res = await ctx.executor.run(cmd, proxy=True, timeout=900)
+
+        lines: List[str] = []
+        if out_file.is_file():
+            lines = read_lines(out_file)
+        elif res.stdout.strip():
+            lines = [l.strip() for l in res.stdout.splitlines() if l.strip().startswith("http")]
+
+        urls = [u for u in lines if is_in_scope(u, ctx.config.domain)]
+
+        return ScanResult(
+            success=res.success,
+            output_files=[out_file] if out_file.is_file() else [],
+            items_count=len(urls),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"urls": urls},
+        )
+
+
+class ParamspiderDriver(ScannerDriver):
+    """Concrete driver for ParamSpider endpoint parameter extractor."""
+
+    def __init__(self, binary_name: str = "paramspider") -> None:
+        super().__init__(name="paramspider", binary_name=binary_name)
+
+    async def execute(self, ctx: StageContext, live_file: Optional[Path] = None, **kwargs: Any) -> ScanResult:
+        target_file = live_file or (ctx.config.outdir / "live.txt")
+        if not target_file.is_file() and not ctx.config.dry_run:
+            return ScanResult(success=True, items_count=0, error="Live hosts file not found for ParamSpider")
+
+        cmd = [self.binary_name, "--list", str(target_file), "--proxy", ctx.config.tor_socks]
+        res = await ctx.executor.run(cmd, proxy=False, timeout=900)
+
+        results_dir = Path("results")
+        urls: List[str] = []
+
+        if target_file.is_file():
+            hosts = read_lines(target_file)
+            for host in hosts:
+                domain = re.sub(r"^https?://", "", host).lower().strip().rstrip("/")
+                pf = results_dir / f"{domain}.txt"
+                if pf.exists():
+                    for line in read_lines(pf):
+                        if "=" in line and line.startswith("http") and is_in_scope(line, ctx.config.domain):
+                            urls.append(line.strip())
+
+        return ScanResult(
+            success=res.success,
+            items_count=len(urls),
+            raw_output=res.stdout,
+            error=res.stderr if not res.success else "",
+            metadata={"urls": urls},
+        )
+

@@ -63,7 +63,7 @@ def inject_native_proxy(cmd: Sequence[str], socks_url: str) -> List[str]:
         return [full_cmd[0], "-x", socks_url, *full_cmd[1:]]
     if tool == "nuclei":
         return [full_cmd[0], "-proxy-socks-url", socks_url, *full_cmd[1:]]
-    if tool in ("dalfox", "paramspider", "katana"):
+    if tool in ("dalfox", "paramspider", "katana", "gau"):
         return [full_cmd[0], "--proxy", socks_url, *full_cmd[1:]]
     if tool == "sqlmap":
         return [full_cmd[0], f"--proxy={socks_url}", *full_cmd[1:]]

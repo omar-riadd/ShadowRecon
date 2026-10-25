@@ -54,17 +54,37 @@ class DriverRegistry:
 def register_defaults(reg: DriverRegistry) -> None:
     """Register default concrete scanner drivers into the specified registry."""
     from shadowrecon.drivers.tools import (
+        AmassDriver,
+        AssetfinderDriver,
         DalfoxDriver,
+        GauDriver,
         HttpxDriver,
         KatanaDriver,
         NucleiDriver,
+        ParamspiderDriver,
         SqlmapDriver,
         SubfinderDriver,
+        Sublist3rDriver,
+        WaybackDriver,
     )
 
+    # Subdomain discovery stage
     reg.register("subdomains", SubfinderDriver(), is_default=True)
+    reg.register("subdomains", AssetfinderDriver())
+    reg.register("subdomains", AmassDriver())
+    reg.register("subdomains", Sublist3rDriver())
+
+    # Probing & crawling stages
     reg.register("probing", HttpxDriver(), is_default=True)
     reg.register("crawling", KatanaDriver(), is_default=True)
+
+    # URL gathering stage
+    reg.register("urls", WaybackDriver(), is_default=True)
+    reg.register("urls", GauDriver())
+    reg.register("urls", KatanaDriver())
+    reg.register("urls", ParamspiderDriver())
+
+    # Vulnerability scanning stages
     reg.register("nuclei", NucleiDriver(), is_default=True)
     reg.register("xss", DalfoxDriver(), is_default=True)
     reg.register("sqli", SqlmapDriver(), is_default=True)

@@ -16,12 +16,30 @@ log = logging.getLogger("shadowrecon.modules.recon")
 
 
 async def run_subdomains_stage(ctx: StageContext) -> List[str]:
-    """Discover subdomains via configured driver (default: subfinder) and update session store."""
-    driver = ctx.drivers.get_driver("subdomains")
-    await driver.execute(ctx)
+    """Discover subdomains via configured driver(s) and update session store."""
+    if "," in ctx.config.driver_subdomains:
+        driver_names = [d.strip() for d in ctx.config.driver_subdomains.split(",") if d.strip()]
+    else:
+        active = ctx.drivers.get_driver(
+            "subdomains",
+            ctx.config.driver_subdomains if ctx.config.driver_subdomains != "subfinder" else None
+        )
+        driver_names = [active.name]
+
+    for d_name in driver_names:
+        try:
+            driver = ctx.drivers.get_driver("subdomains", d_name)
+            if driver.is_available() or ctx.config.dry_run:
+                log.info("Executing subdomain driver: %s", driver.name)
+                await driver.execute(ctx)
+            else:
+                log.warning("Subdomain driver '%s' not available on system, skipping.", d_name)
+        except Exception as exc:
+            log.warning("Driver '%s' failed in subdomains stage: %s", d_name, exc)
+
     stored_subs = ctx.store.get_subdomains()
     out_file = ctx.config.outdir / "subdomains.txt"
-    log.info("Subdomains discovered: %d -> %s", len(stored_subs), out_file.name)
+    log.info("Subdomains discovered (aggregated): %d -> %s", len(stored_subs), out_file.name)
     await ctx.bus.close_topic("subdomain")
     return stored_subs
 
@@ -38,83 +56,61 @@ async def run_probing_stage(ctx: StageContext) -> List[str]:
 
 
 async def harvest_wayback(ctx: StageContext) -> List[str]:
-    """Query Wayback Machine archives using waybackpy."""
-    out_file = ctx.config.outdir / "wayback.txt"
-    cmd = ["waybackpy", "--url", ctx.config.domain, "-sub", "-ku"]
-    res = await ctx.executor.run(cmd, proxy=True, timeout=900, capture_to=out_file)
-    urls = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("http")]
-    log.info("Wayback Machine returned %d URLs", len(urls))
-    return urls
+    """Query Wayback Machine archives using configured driver."""
+    try:
+        driver = ctx.drivers.get_driver("urls", "wayback")
+        res = await driver.execute(ctx)
+        return res.metadata.get("urls", [])
+    except Exception as exc:
+        log.warning("Wayback gathering encountered error: %s", exc)
+        return []
 
 
 async def harvest_katana(ctx: StageContext, live_file: Path) -> List[str]:
-    """Crawl live endpoints using katana driver if available."""
+    """Crawl live endpoints using katana driver."""
     try:
-        driver = ctx.drivers.get_driver("crawling")
-        if not driver.is_available() and not ctx.config.dry_run:
-            return []
+        driver = ctx.drivers.get_driver("urls", "katana")
         res = await driver.execute(ctx, live_file=live_file)
-        urls = res.metadata.get("urls", [])
-        log.info("Katana crawler discovered %d URLs", len(urls))
-        return urls
+        return res.metadata.get("urls", [])
     except Exception as exc:
         log.warning("Katana crawler encountered error: %s", exc)
         return []
 
 
 async def harvest_paramspider(ctx: StageContext, live_file: Path) -> List[str]:
-    """Extract parameterized endpoints using ParamSpider."""
-    paramspider_bin = resolve_binary("paramspider")
-    if not shutil.which(paramspider_bin) and not Path(paramspider_bin).is_file():
+    """Extract parameterized endpoints using paramspider driver."""
+    try:
+        driver = ctx.drivers.get_driver("urls", "paramspider")
+        res = await driver.execute(ctx, live_file=live_file)
+        return res.metadata.get("urls", [])
+    except Exception as exc:
+        log.warning("ParamSpider encountered error: %s", exc)
         return []
-
-    cmd = ["paramspider", "--list", str(live_file), "--proxy", ctx.config.tor_socks]
-    await ctx.executor.run(cmd, proxy=False, timeout=900)
-
-    results_dir = Path("results")
-    urls: List[str] = []
-
-    hosts = read_lines(live_file)
-    for host in hosts:
-        domain = re.sub(r"^https?://", "", host).lower().strip().rstrip("/")
-        pf = results_dir / f"{domain}.txt"
-        if not pf.exists():
-            continue
-        for line in read_lines(pf):
-            if "=" in line and line.startswith("http") and is_in_scope(line, ctx.config.domain):
-                urls.append(line.strip())
-
-    log.info("ParamSpider harvested %d URLs", len(urls))
-    return urls
 
 
 async def run_urls_stage(ctx: StageContext) -> List[str]:
-    """Harvest and deduplicate parameterized endpoints across all sources."""
+    """Harvest and deduplicate parameterized endpoints across configured URL drivers."""
     live_file = ctx.config.outdir / "live.txt"
     all_raw_urls: List[str] = []
 
-    # 1. Wayback Machine
-    try:
-        wayback_urls = await harvest_wayback(ctx)
-        all_raw_urls.extend(wayback_urls)
-    except Exception as exc:
-        log.warning("Wayback gathering encountered error: %s", exc)
+    # Get configured URL harvesting drivers (e.g. "wayback,katana,paramspider" or "gau,katana")
+    driver_names = [d.strip() for d in ctx.config.driver_urls.split(",") if d.strip()]
+    if not driver_names:
+        driver_names = ["wayback", "katana", "paramspider"]
 
-    # 2. Katana Crawler
-    if live_file.is_file() and live_file.stat().st_size > 0:
+    for d_name in driver_names:
         try:
-            katana_urls = await harvest_katana(ctx, live_file)
-            all_raw_urls.extend(katana_urls)
+            driver = ctx.drivers.get_driver("urls", d_name)
+            if not driver.is_available() and not ctx.config.dry_run:
+                log.info("URL driver '%s' not installed/available, skipping.", d_name)
+                continue
+            log.info("Executing URL harvesting driver: %s", driver.name)
+            res = await driver.execute(ctx, live_file=live_file)
+            urls = res.metadata.get("urls", [])
+            log.info("Driver '%s' discovered %d URLs", driver.name, len(urls))
+            all_raw_urls.extend(urls)
         except Exception as exc:
-            log.warning("Katana crawler encountered error: %s", exc)
-
-    # 3. ParamSpider
-    if live_file.is_file() and live_file.stat().st_size > 0:
-        try:
-            ps_urls = await harvest_paramspider(ctx, live_file)
-            all_raw_urls.extend(ps_urls)
-        except Exception as exc:
-            log.warning("ParamSpider encountered error: %s", exc)
+            log.warning("URL driver '%s' encountered error: %s", d_name, exc)
 
     # Filter parameterized & in-scope
     valid_param_urls = [
