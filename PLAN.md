@@ -281,8 +281,8 @@ To prevent breaking existing user scripts, configurations, or CI pipelines:
 * [x] Root `main.py` is reduced to a clean bootstrap shim with zero deprecated code.
 * [x] Tor proxy configurations normalize to `socks5h://` with remote DNS resolution verified.
 * [x] Duplicate findings are eliminated via unique fingerprinting in `SessionStore`.
-* [ ] Dalfox, FFUF, and SQLMap concurrency dynamically scale with `--concurrency`.
-* [ ] WAF module supports query/payload encoding mutations and passes `--tamper` to SQLMap.
+* [x] Dalfox, FFUF, and SQLMap concurrency dynamically scale with `--concurrency`.
+* [x] WAF module supports query/payload encoding mutations and passes `--tamper` to SQLMap.
 * [ ] True streaming mode allows crawling and probing to run concurrently.
 * [ ] In-memory mock server integration tests verify live pipeline workflows.
 * [ ] Complete test suite passes with **> 200 unit tests** and 0 regressions.
