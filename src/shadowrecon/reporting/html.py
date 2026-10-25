@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shadowrecon.core.scope import read_lines
+from shadowrecon.storage.diff import SessionDiff
 from shadowrecon.storage.session import SessionStore
 
 
@@ -111,9 +112,39 @@ def generate_report_from_store(
     out_dir: Path,
     meta: Dict[str, Any],
     out_name: str = "report.html",
+    drift: Optional[SessionDiff] = None,
 ) -> Path:
     """Generate self-contained HTML report directly from SessionStore records."""
     sections: List[Section] = []
+
+    # 0. Asset & Vulnerability Drift (if comparing with prior session)
+    if drift and drift.has_drift():
+        drift_items: List[str] = []
+        if drift.new_subdomains:
+            drift_items.append(f"[+ New Subdomains: {len(drift.new_subdomains)}]")
+            drift_items.extend(f"  + {s}" for s in drift.new_subdomains[:MAX_PREVIEW])
+        if drift.removed_subdomains:
+            drift_items.append(f"[- Removed Subdomains: {len(drift.removed_subdomains)}]")
+            drift_items.extend(f"  - {s}" for s in drift.removed_subdomains[:MAX_PREVIEW])
+        if drift.new_hosts:
+            drift_items.append(f"[+ New Live Hosts: {len(drift.new_hosts)}]")
+            drift_items.extend(f"  + {h}" for h in drift.new_hosts[:MAX_PREVIEW])
+        if drift.removed_hosts:
+            drift_items.append(f"[- Removed Hosts: {len(drift.removed_hosts)}]")
+            drift_items.extend(f"  - {h}" for h in drift.removed_hosts[:MAX_PREVIEW])
+        if drift.status_changes:
+            drift_items.append(f"[* HTTP Status Shifts: {len(drift.status_changes)}]")
+            drift_items.extend(f"  * {sc['url']}: HTTP {sc['old_status']} -> HTTP {sc['new_status']}" for sc in drift.status_changes[:MAX_PREVIEW])
+        if drift.new_findings:
+            drift_items.append(f"[+ New Vulnerabilities: {len(drift.new_findings)}]")
+            drift_items.extend(f"  + [{f.severity.upper()}] {f.vuln_type} on {f.target_url}" for f in drift.new_findings)
+        if drift.resolved_findings:
+            drift_items.append(f"[- Remediated Vulnerabilities: {len(drift.resolved_findings)}]")
+            drift_items.extend(f"  - [{f.severity.upper()}] {f.vuln_type} on {f.target_url}" for f in drift.resolved_findings)
+
+        total_drift = sum(drift.summary_counts().values())
+        prior_label = Path(drift.prior_db_path).name if drift.prior_db_path else "prior"
+        sections.append(Section("Asset & Vuln Drift", "warn", total_drift, drift_items, note=f"delta vs {prior_label}"))
 
     # 1. WAF Bypasses
     bypasses = store.get_waf_bypasses()

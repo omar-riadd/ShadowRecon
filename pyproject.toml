@@ -22,6 +22,7 @@ dev = ["pytest>=7.0", "bandit>=1.7", "pip-audit>=2.7"]
 
 [project.scripts]
 shadowrecon = "shadowrecon.cli:main"
+shadowrecon-diff = "shadowrecon.storage.diff:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

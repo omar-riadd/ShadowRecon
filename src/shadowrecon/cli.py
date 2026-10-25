@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -35,6 +36,7 @@ from shadowrecon.modules.waf import run_waf_stage
 from shadowrecon.pipeline.queue import AsyncEventBus
 from shadowrecon.pipeline.runner import PipelineRunner, StageContext, StageResult
 from shadowrecon.reporting.html import generate_report_from_store
+from shadowrecon.storage.diff import SessionDiff, diff_sessions
 from shadowrecon.storage.session import SessionStore
 
 BANNER = r"""
@@ -126,6 +128,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tags", "--nuclei-tags", dest="nuclei_tags", default="", help="Nuclei template tags filter (e.g. cve,misconfig,exposure)")
     p.add_argument("--nuclei-templates", help="Path to nuclei-templates directory (default: ~/.local/nuclei-templates or ~/nuclei-templates)")
     p.add_argument("--config", help="Path to shadowrecon.toml config file")
+    p.add_argument("--diff", dest="diff_db", help="Path to prior session.db for cross-session differential drift analysis")
     p.add_argument("--dry-run", action="store_true", help="Simulate execution without sending live packets")
     p.add_argument("--proxy-provider", default="tor", choices=["tor", "pool", "direct"], help="Proxy provider to use (default: tor)")
     p.add_argument("--proxy-pool", dest="proxy_pool_file", help="Path to file containing rotating proxy URLs")
@@ -328,6 +331,24 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     # Export flat artifacts for backward compatibility
     store.export_flat_artifacts(cfg.outdir)
 
+    # Cross-session differential drift analysis (if --diff specified)
+    diff_result: Optional[SessionDiff] = None
+    if args.diff_db:
+        prior_db_path = Path(args.diff_db).resolve()
+        if not prior_db_path.is_file():
+            log.warning("Prior session database for --diff not found at '%s'. Skipping differential analysis.", prior_db_path)
+        else:
+            try:
+                diff_result = diff_sessions(store, prior_db_path)
+                log.info("Calculated cross-session drift against prior run: %s", prior_db_path.name)
+                drift_json_path = cfg.outdir / "drift_summary.json"
+                drift_txt_path = cfg.outdir / "drift_summary.txt"
+                drift_json_path.write_text(json.dumps(diff_result.to_dict(), indent=2) + "\n", encoding="utf-8")
+                drift_txt_path.write_text(diff_result.format_console_report() + "\n", encoding="utf-8")
+                log.info("Drift summary exported -> %s", drift_json_path.name)
+            except Exception as exc:
+                log.error("Failed to calculate differential drift: %s", exc)
+
     # Generate HTML Report
     if cfg.make_report:
         report_meta = {
@@ -338,7 +359,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
             "Tor Proxy": cfg.tor_socks if cfg.use_proxy else "Disabled",
             "Output Directory": str(cfg.outdir),
         }
-        report_path = generate_report_from_store(store, cfg.outdir, report_meta)
+        report_path = generate_report_from_store(store, cfg.outdir, report_meta, drift=diff_result)
         log.info("HTML Report generated -> %s", report_path)
 
     # Print Summary Table
@@ -351,7 +372,13 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     print("=" * 50)
     print(f" SQLite Session DB : {db_path}")
     print(f" Artifacts Directory: {cfg.outdir}")
+    if diff_result:
+        print(f" Drift Summary     : {cfg.outdir / 'drift_summary.json'}")
     print("=" * 50 + "\n")
+
+    # Print Drift Report to console if generated
+    if diff_result:
+        print(diff_result.format_console_report() + "\n")
 
     return 0
 

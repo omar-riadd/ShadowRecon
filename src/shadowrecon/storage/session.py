@@ -231,6 +231,21 @@ class SessionStore:
             rows = conn.execute("SELECT url FROM hosts ORDER BY url").fetchall()
             return [r["url"] for r in rows]
 
+    def get_host_records(self) -> List[HostRecord]:
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT * FROM hosts ORDER BY url").fetchall()
+            return [
+                HostRecord(
+                    url=r["url"],
+                    status_code=r["status_code"] or 0,
+                    title=r["title"] or "",
+                    webserver=r["webserver"] or "",
+                    content_length=r["content_length"] or 0,
+                    timestamp=r["created_at"] or "",
+                )
+                for r in rows
+            ]
+
     def add_urls(self, urls: Iterable[str], source: str = "archive") -> int:
         """Add URLs with parameter signature deduplication.
 
