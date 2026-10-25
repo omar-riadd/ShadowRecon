@@ -24,6 +24,9 @@ class ProcessResult:
         return self.returncode == 0
 
 
+ExecutionResult = ProcessResult
+
+
 def resolve_binary(tool_name: str) -> str:
     """Resolve executable path, handling tool-specific platform conventions."""
     if tool_name == "httpx":

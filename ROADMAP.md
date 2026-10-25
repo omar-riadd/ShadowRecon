@@ -115,10 +115,10 @@ Following the successful implementation of the **v3.0 Async Redesign** (which in
 
 ## 3. Implementation Phasing
 
-| Phase | Milestone | Primary Modules Affected | Deliverables |
-|---|---|---|---|
-| **Phase 1** | Smart Rate-Limit & Proxy Rotation | `src/shadowrecon/core/`, `executor.py` | Adaptive backoff (429/503), residential/datacenter proxy pool support, circuit health telemetry |
-| **Phase 2** | Nuclei Engine Expansion | `src/shadowrecon/modules/takeover.py`, `nuclei.py` | Full Nuclei severity filtering (`--severity medium,high,critical`), tag filtering, structured JSON ingestion |
-| **Phase 3** | Differential Analysis | `src/shadowrecon/storage/`, `cli.py` | `--diff` flag, database comparison engine, drift reporting |
-| **Phase 4** | Enterprise Exports | `src/shadowrecon/reporting/` | SARIF, JSON, and CSV exporters |
-| **Phase 5** | Driver Decoupling & Config | `src/shadowrecon/modules/`, `config.py` | Abstract `ScannerDriver` class, mock test drivers, strict TOML schema validation |
+| Phase | Milestone | Primary Modules Affected | Deliverables | Status |
+|---|---|---|---|---|
+| **Phase 1** | Smart Rate-Limit & Proxy Rotation | `src/shadowrecon/core/`, `executor.py` | Adaptive backoff (429/503), residential/datacenter proxy pool support, circuit health telemetry | Completed |
+| **Phase 2** | Nuclei Engine Expansion | `src/shadowrecon/modules/takeover.py`, `nuclei.py` | Full Nuclei severity filtering (`--severity medium,high,critical`), tag filtering, structured JSON ingestion | Completed |
+| **Phase 3** | Differential Analysis | `src/shadowrecon/storage/`, `cli.py` | `--diff` flag, database comparison engine, drift reporting | Up Next |
+| **Phase 4** | Enterprise Exports | `src/shadowrecon/reporting/` | SARIF, JSON, and CSV exporters | Planned |
+| **Phase 5** | Driver Decoupling & Config | `src/shadowrecon/modules/`, `config.py` | Abstract `ScannerDriver` class, mock test drivers, strict TOML schema validation | Planned |

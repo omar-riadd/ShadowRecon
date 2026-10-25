@@ -24,6 +24,7 @@ from shadowrecon.modules.recon import (
     run_subdomains_stage,
     run_urls_stage,
 )
+from shadowrecon.modules.nuclei import run_nuclei_stage
 from shadowrecon.modules.takeover import run_takeover_stage
 from shadowrecon.modules.vuln import (
     run_lfi_stage,
@@ -121,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rate-limit", type=float, default=0.0, help="Delay between requests in seconds")
     p.add_argument("--max-backoff", type=float, default=60.0, help="Maximum exponential backoff in seconds (default: 60)")
     p.add_argument("--threads", type=int, default=5, help="FFUF thread count (low default for Tor)")
+    p.add_argument("--severity", "--nuclei-severity", dest="nuclei_severity", default="medium,high,critical", help="Nuclei CVSS severity filter (default: medium,high,critical)")
+    p.add_argument("--tags", "--nuclei-tags", dest="nuclei_tags", default="", help="Nuclei template tags filter (e.g. cve,misconfig,exposure)")
+    p.add_argument("--nuclei-templates", help="Path to nuclei-templates directory (default: ~/nuclei-templates)")
     p.add_argument("--config", help="Path to shadowrecon.toml config file")
     p.add_argument("--dry-run", action="store_true", help="Simulate execution without sending live packets")
     p.add_argument("--proxy-provider", default="tor", choices=["tor", "pool", "direct"], help="Proxy provider to use (default: tor)")
@@ -179,6 +183,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     )
     max_backoff = args.max_backoff or toml_cfg.get("max_backoff", 60.0)
 
+    nuclei_tmpl = Path(args.nuclei_templates).resolve() if args.nuclei_templates else (
+        Path(toml_cfg["nuclei_templates"]).resolve() if toml_cfg.get("nuclei_templates") else Path.home() / "nuclei-templates"
+    )
+    nuclei_sev = args.nuclei_severity or toml_cfg.get("nuclei_severity", "medium,high,critical")
+    nuclei_tags = args.nuclei_tags or toml_cfg.get("nuclei_tags", "")
+
     # Construct Config
     cfg = Config(
         target=target_url,
@@ -202,6 +212,9 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         force_rerun=args.force_rerun,
         stages=args.stages,
         skip_stages=args.skip_stages,
+        nuclei_templates=nuclei_tmpl,
+        nuclei_severity=nuclei_sev,
+        nuclei_tags=nuclei_tags,
     )
 
     # Initialize Proxy Provider
@@ -301,6 +314,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     runner.add_stage("subdomains", "Passive subdomain enumeration", run_subdomains_stage)
     runner.add_stage("probing", "Active HTTP/HTTPS service probing", run_probing_stage)
     runner.add_stage("takeover", "Subdomain takeover analysis", run_takeover_stage)
+    runner.add_stage("vuln_nuclei", "Nuclei CVSS vulnerability scanning", run_nuclei_stage)
     runner.add_stage("urls", "Endpoint parameter harvesting & deduplication", run_urls_stage)
     runner.add_stage("fuzzing", "Directory and path fuzzing", run_fuzzing_stage)
     runner.add_stage("vuln_xss", "Reflected XSS vulnerability testing", run_xss_stage)

@@ -72,6 +72,8 @@ class Config:
     stages: str = "all"
     skip_stages: str = ""
     nuclei_templates: Path = field(default_factory=lambda: Path.home() / "nuclei-templates")
+    nuclei_severity: str = "medium,high,critical"
+    nuclei_tags: str = ""
 
     @property
     def proxies(self) -> dict:
