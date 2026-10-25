@@ -27,6 +27,9 @@ def in_scope(url: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
+is_in_scope = in_scope
+
+
 def slugify(value: str, maxlen: int = 80) -> str:
     """Sanitize arbitrary strings (like URLs) into filesystem-safe filenames."""
     return re.sub(r"[^a-zA-Z0-9]", "_", value)[:maxlen]
