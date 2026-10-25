@@ -105,7 +105,7 @@ class AsyncExecutor:
             return ProcessResult(returncode=0, stdout="", stderr="", command=cmd)
 
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(  # nosec B603
                 cmd[0],
                 *cmd[1:],
                 stdout=asyncio.subprocess.PIPE,

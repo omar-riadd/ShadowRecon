@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shadowrecon"
-version = "2.0.0"
+version = "3.0.0"
 description = "Tor-anonymized reconnaissance & vulnerability pipeline for authorized web-app testing"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "Proprietary / authorized-use-only" }
 authors = [{ name = "lumidren" }]
 keywords = ["recon", "security", "pentest", "tor", "waf"]
@@ -21,7 +21,7 @@ pretty = ["rich>=13.0"]
 dev = ["pytest>=7.0", "bandit>=1.7", "pip-audit>=2.7"]
 
 [project.scripts]
-shadowrecon = "main:main"
+shadowrecon = "shadowrecon.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
