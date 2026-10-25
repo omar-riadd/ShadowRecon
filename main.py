@@ -59,7 +59,7 @@ TOOLS = {
     "paramspider": "pipx install paramspider",
     "tor": "sudo apt install tor (enable ControlPort + HashedControlPassword in /etc/tor/torrc)",
     "subfinder": "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
-    "httpx": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest",
+    "httpx-toolkit": "sudo apt install httpx-toolkit (or: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest)",
     "ffuf": "sudo apt install ffuf",
     "waybackpy": "pipx install waybackpy",
     "nuclei": "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
@@ -97,8 +97,43 @@ class Config:
         return {"http": self.tor_socks, "https": self.tor_socks}
 
 
+@dataclass
+class BypassContext:
+    """Carries a confirmed WAF-bypass mutation into downstream scanning tools."""
+    headers: dict = field(default_factory=dict)
+    method_override: str = ""
+    desc: str = "none"
+
+    @classmethod
+    def from_payload(cls, p: dict) -> "BypassContext":
+        return cls(
+            headers=p.get("headers", {}),
+            method_override=p.get("method", ""),
+            desc=p.get("desc", ""),
+        )
+
+    def dalfox_args(self) -> list[str]:
+        args = []
+        for k, v in self.headers.items():
+            args.extend(["--header", f"{k}: {v}"])
+        return args
+
+    def sqlmap_args(self) -> list[str]:
+        if not self.headers:
+            return []
+        header_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+        return ["--headers", header_str]
+
+    def ffuf_args(self) -> list[str]:
+        args = []
+        for k, v in self.headers.items():
+            args.extend(["-H", f"{k}: {v}"])
+        return args
+
+
 class _DryRun(Exception):
     """Sentinel so dry-run short-circuits a request without side effects."""
+
 
 
 # =======================
@@ -224,15 +259,43 @@ def detect_waf(cfg: Config) -> Optional[str]:
     return None
 
 
-def run_payloads(cfg: Config, payloads: list) -> None:
-    """Send the preserved WAF-bypass payloads via Tor, logging any 200 OK."""
+def run_payloads(cfg: Config, payloads: list) -> list[dict]:
+    """Send WAF-bypass payloads via Tor. A bypass is confirmed when the WAF
+    actively blocks a probe request (403/429) but returns 200 OK under mutation.
+
+    Returns a list of winning payload dicts for downstream tool injection."""
+    probe_param = "__shadowrecon_probe=1'OR'1'='1"
+    sep = "&" if "?" in cfg.target else "?"
+    probe_url = f"{cfg.target}{sep}{probe_param}"
+    baseline_blocked = False
+
+    try:
+        baseline_resp = http_request(cfg, "GET", probe_url)
+        baseline_blocked = baseline_resp.status_code in BLOCK_STATUS_CODES
+        log.info("WAF baseline probe: HTTP %d (blocked=%s)",
+                 baseline_resp.status_code, baseline_blocked)
+    except _DryRun:
+        pass
+    except ValueError as e:
+        log.warning("Baseline probe out of scope: %s", e)
+    except Exception as e:
+        log.info("Baseline probe error: %s", e)
+
     hits = cfg.outdir / "200-ok.txt"
+    winning_payloads: list[dict] = []
     with hits.open("a", encoding="utf-8") as fh:
         for p in payloads:
             test_url = p.get("url", cfg.target)
             method = p.get("method", "GET")
+            # If baseline was blocked, test the mutation with the probe payload
+            if baseline_blocked:
+                p_sep = "&" if "?" in test_url else "?"
+                eval_url = f"{test_url}{p_sep}{probe_param}"
+            else:
+                eval_url = test_url
+
             try:
-                resp = http_request(cfg, method, test_url,
+                resp = http_request(cfg, method, eval_url,
                                     headers=p.get("headers", {}),
                                     data=p.get("data"))
             except _DryRun:
@@ -243,14 +306,25 @@ def run_payloads(cfg: Config, payloads: list) -> None:
             except Exception as e:
                 log.info("[%s] error: %s", p["desc"], e)
                 continue
-            msg = (f"[{p['desc']}] -> {method} {test_url} | "
+
+            msg = (f"[{p['desc']}] -> {method} {eval_url} | "
                    f"{resp.status_code} | len={len(resp.text)}")
             log.info(msg)
-            if resp.status_code == 200:
+
+            # Record bypass when 200 OK is achieved against an active blocking baseline
+            if resp.status_code == 200 and baseline_blocked:
                 fh.write(msg + "\n")
+                winning_payloads.append(p)
+                log.info("  *** CONFIRMED WAF BYPASS: %s ***", p["desc"])
+            elif resp.status_code == 200 and not baseline_blocked:
+                # Target does not block baseline; mutation works but bypass is unconfirmed
+                fh.write(f"[candidate] {msg}\n")
+                winning_payloads.append(p)
+
+    return winning_payloads
 
 
-def stage_waf(cfg: Config) -> None:
+def stage_waf(cfg: Config) -> list[dict]:
     name = detect_waf(cfg)
     builder = waf_payloads.default_payloads
     if name:
@@ -263,7 +337,8 @@ def stage_waf(cfg: Config) -> None:
             log.info("Unknown WAF - using generic payload set.")
     else:
         log.info("Using generic payload set.")
-    run_payloads(cfg, builder(cfg.target))
+    return run_payloads(cfg, builder(cfg.target))
+
 
 
 # =======================
@@ -281,12 +356,26 @@ def enum_subdomains(cfg: Config) -> Path:
     return out
 
 
+def resolve_httpx() -> str:
+    """Resolve ProjectDiscovery httpx binary. On Debian/Kali, the package is named
+    'httpx-toolkit' to avoid collision with python3-httpx. Elsewhere it may be 'httpx'
+    or in ~/go/bin/httpx."""
+    if shutil.which("httpx-toolkit"):
+        return "httpx-toolkit"
+    go_bin = Path.home() / "go" / "bin" / "httpx"
+    if go_bin.is_file() and os.access(go_bin, os.X_OK):
+        return str(go_bin)
+    return "httpx"
+
+
 def probe_httpx(cfg: Config, subs: Path) -> Path:
     out = cfg.outdir / "live.txt"
-    run_tool(cfg, ["httpx", "-silent", "-l", str(subs),
+    httpx_bin = resolve_httpx()
+    run_tool(cfg, [httpx_bin, "-silent", "-l", str(subs),
                    "-mc", "200,301,302", "-o", str(out)], timeout=900)
     log.info("Live hosts: %d -> %s", count_lines(out), out.name)
     return out
+
 
 
 def wayback_urls(cfg: Config) -> Path:
@@ -331,16 +420,18 @@ def build_param_urls(cfg: Config, wayback: Path) -> Path:
 
 
 def run_paramspider(cfg: Config, live: Path, params: Path) -> None:
-    """ParamSpider writes one file per domain; merge in-scope '=' URLs into
-    params.txt. Failures are logged rather than silently dropped."""
-    run_tool(cfg, ["paramspider", "--list", str(live)],
+    """ParamSpider writes results/<domain>.txt (raw domain with dots preserved).
+    Merge all in-scope parameterized URLs into params.txt."""
+    run_tool(cfg, ["paramspider", "--list", str(live), "--proxy", cfg.tor_socks],
              proxychain=False, timeout=900)
+    results_dir = Path("results")
     merged = 0
     with params.open("a", encoding="utf-8") as out:
         for host in read_lines(live):
-            stem = re.sub(r"^https?://", "", host)
-            pf = Path(re.sub(r"[/:.]", "_", stem) + ".txt")
+            domain = re.sub(r"^https?://", "", host).lower().strip().rstrip("/")
+            pf = results_dir / f"{domain}.txt"
             if not pf.exists():
+                log.warning("ParamSpider output not found: %s", pf)
                 continue
             for line in read_lines(pf):
                 if "=" in line and line.startswith("http") and in_scope(line, cfg.domain):
@@ -353,37 +444,46 @@ def run_paramspider(cfg: Config, live: Path, params: Path) -> None:
 #   VULN STAGES
 # =======================
 
-def xss_with_dalfox(cfg: Config, params: Path) -> Path:
+def xss_with_dalfox(cfg: Config, params: Path,
+                    bypass: Optional[BypassContext] = None) -> Path:
     out = cfg.outdir / "xss_dalfox.txt"
+    extra = bypass.dalfox_args() if bypass else []
     run_tool(cfg, ["dalfox", "file", str(params),
-                   "--only-poc", "--worker", "1", "-o", str(out)], timeout=600)
+                   "--only-poc", "--worker", "1", "-o", str(out),
+                   *extra], timeout=600)
     log.info("Dalfox XSS done -> %s", out.name)
     return out
 
 
-def sqli_with_sqlmap(cfg: Config, params: Path) -> Path:
+def sqli_with_sqlmap(cfg: Config, params: Path,
+                     bypass: Optional[BypassContext] = None) -> Path:
     out = cfg.outdir / "sqlmap_out"
     out.mkdir(exist_ok=True)
+    extra = bypass.sqlmap_args() if bypass else []
     run_tool(cfg, ["sqlmap", "-m", str(params), "--batch", "--random-agent",
-                   "--level", "1", "--risk", "1", f"--output-dir={out}"],
-             timeout=3600)
+                   "--level", "1", "--risk", "1", f"--output-dir={out}",
+                   *extra], timeout=3600)
     log.info("SQLMap run finished -> %s", out.name)
     return out
 
 
-def lfi_ssrf_with_ffuf(cfg: Config, params: Path) -> None:
+def lfi_ssrf_with_ffuf(cfg: Config, params: Path,
+                       bypass: Optional[BypassContext] = None) -> None:
     if not cfg.lfi_payloads:
         return
     out_dir = cfg.outdir / "ffuf_lfi_ssrf"
     out_dir.mkdir(exist_ok=True)
+    extra = bypass.ffuf_args() if bypass else []
     for base in read_lines(params):
         if "=" not in base:
             continue
         url = re.sub(r"=([^&]*)", "=FUZZ", base, count=1)
         run_tool(cfg, ["ffuf", "-w", str(cfg.lfi_payloads), "-u", url,
                        "-mc", "200,500", "-of", "csv",
-                       "-o", str(out_dir / f"{slugify(url)}.csv")], timeout=1200)
+                       "-o", str(out_dir / f"{slugify(url)}.csv"),
+                       *extra], timeout=1200)
     log.info("FFUF LFI/SSRF fuzzing -> %s", out_dir.name)
+
 
 
 # =======================
@@ -398,7 +498,8 @@ def check_tools(cfg: Config) -> None:
     missing = []
     log.info("Tool check:")
     for tool, hint in TOOLS.items():
-        if shutil.which(tool):
+        bin_path = resolve_httpx() if tool == "httpx-toolkit" else tool
+        if shutil.which(bin_path) or (Path(bin_path).is_file() and os.access(bin_path, os.X_OK)):
             log.info("  [OK] %s", tool)
         else:
             log.warning("  [MISSING] %s - install: %s", tool, hint)
@@ -521,7 +622,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     authorization_gate(cfg, args.authorized, args.yes)
 
     started = datetime.now()
-    stage_waf(cfg)                                   # 0) WAF detect + bypass payloads
+    winning = stage_waf(cfg)                         # 0) WAF detect + bypass payloads
+    bypass = BypassContext.from_payload(winning[0]) if winning else None
+    if bypass:
+        log.info("Active scanners will use WAF bypass: %s", bypass.desc)
+
     subs = enum_subdomains(cfg)                      # 1) subdomains -> live
     live = probe_httpx(cfg, subs)
     wayback = wayback_urls(cfg)                      # 2) historical URLs + dir fuzz
@@ -529,11 +634,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     nuclei_takeover(cfg, live)                       # 3) takeover + params
     params = build_param_urls(cfg, wayback)
     run_paramspider(cfg, live, params)
-    xss_with_dalfox(cfg, params)                     # 4) active vuln scans
-    sqli_with_sqlmap(cfg, params)
-    lfi_ssrf_with_ffuf(cfg, params)
+    xss_with_dalfox(cfg, params, bypass=bypass)       # 4) active vuln scans
+    sqli_with_sqlmap(cfg, params, bypass=bypass)
+    lfi_ssrf_with_ffuf(cfg, params, bypass=bypass)
 
     finish(cfg, started)
+
 
 
 if __name__ == "__main__":

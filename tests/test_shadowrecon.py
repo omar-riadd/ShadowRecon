@@ -84,5 +84,78 @@ class TestReport(unittest.TestCase):
             self.assertIn("Subdomains", html)
 
 
+class TestBypassContext(unittest.TestCase):
+    def test_dalfox_args(self):
+        import main
+        b = main.BypassContext(headers={"X-Forwarded-For": "127.0.0.1"})
+        args = b.dalfox_args()
+        self.assertEqual(args, ["--header", "X-Forwarded-For: 127.0.0.1"])
+
+    def test_sqlmap_args(self):
+        import main
+        b = main.BypassContext(headers={"X-Forwarded-For": "127.0.0.1", "User-Agent": "Googlebot"})
+        args = b.sqlmap_args()
+        self.assertEqual(args, ["--headers", "X-Forwarded-For: 127.0.0.1\nUser-Agent: Googlebot"])
+
+    def test_ffuf_args(self):
+        import main
+        b = main.BypassContext(headers={"X-Forwarded-For": "127.0.0.1"})
+        args = b.ffuf_args()
+        self.assertEqual(args, ["-H", "X-Forwarded-For: 127.0.0.1"])
+
+    def test_empty_args(self):
+        import main
+        b = main.BypassContext()
+        self.assertEqual(b.dalfox_args(), [])
+        self.assertEqual(b.sqlmap_args(), [])
+        self.assertEqual(b.ffuf_args(), [])
+
+
+class TestParamSpiderPath(unittest.TestCase):
+    def test_paramspider_reads_results_dir(self):
+        import os
+        import tempfile
+        import main
+
+        with tempfile.TemporaryDirectory() as d:
+            old_cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                results_dir = Path("results")
+                results_dir.mkdir()
+                (results_dir / "api.example.com.txt").write_text(
+                    "https://api.example.com/v1?user=FUZZ\nhttps://other.com/bad?x=1\n",
+                    encoding="utf-8"
+                )
+                live = Path("live.txt")
+                live.write_text("https://api.example.com\n", encoding="utf-8")
+                params = Path("params.txt")
+                params.write_text("", encoding="utf-8")
+
+                cfg = main.Config(
+                    target="https://example.com/",
+                    domain="example.com",
+                    wordlist=Path("w.txt"),
+                    outdir=Path(d),
+                    dry_run=True,
+                )
+                main.run_paramspider(cfg, live, params)
+
+                lines = utils.read_lines(params)
+                self.assertEqual(len(lines), 1)
+                self.assertIn("user=FUZZ", lines[0])
+            finally:
+                os.chdir(old_cwd)
+
+
+class TestResolveHttpx(unittest.TestCase):
+    def test_resolve_httpx_finds_available_binary(self):
+        import main
+        binary = main.resolve_httpx()
+        self.assertIn(binary, ("httpx-toolkit", "httpx", str(Path.home() / "go" / "bin" / "httpx")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+

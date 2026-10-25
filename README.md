@@ -70,10 +70,9 @@ ANALYSIS.md        # gap/vuln analysis + rationale for every change
 pip install -r requirements.txt   # optional extras: pip install rich
 
 # External tools (Kali/Parrot/Debian)
-sudo apt install tor proxychains4 ffuf sqlmap wafw00f
+sudo apt install tor proxychains4 ffuf sqlmap wafw00f httpx-toolkit
 pipx install waybackpy paramspider
 go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 go install github.com/hahwul/dalfox/v2@latest
 ```

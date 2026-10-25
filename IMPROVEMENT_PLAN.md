@@ -9,39 +9,67 @@
 ## Table of Contents
 
 1. [Gap Registry](#gap-registry)
-2. [Phase 1 — Critical Bugs](#phase-1--critical-bugs)
-3. [Phase 2 — Correctness & Robustness](#phase-2--correctness--robustness)
-4. [Phase 3 — Architecture & Usability](#phase-3--architecture--usability)
-5. [Phase 4 — Testing](#phase-4--testing)
-6. [Phase 5 — Documentation & Packaging](#phase-5--documentation--packaging)
-7. [Implementation Sequence](#implementation-sequence)
+2. [Architectural Alternatives & Tech Stack Evaluation](#architectural-alternatives--tech-stack-evaluation)
+3. [Phase 1 — Critical Bugs](#phase-1--critical-bugs)
+4. [Phase 2 — Correctness & Robustness](#phase-2--correctness--robustness)
+5. [Phase 3 — Architecture & Usability](#phase-3--architecture--usability)
+6. [Phase 4 — Testing](#phase-4--testing)
+7. [Phase 5 — Documentation & Packaging](#phase-5--documentation--packaging)
+8. [Implementation Sequence](#implementation-sequence)
 
 ---
 
 ## Gap Registry
 
-| ID | Severity | Category | Short Description | File(s) | Lines |
-|----|----------|----------|-------------------|---------|-------|
-| G01 | 🔴 Critical | Bug | ParamSpider file lookup always fails — 0 URLs ever merged | `main.py` | 333–349 |
-| G02 | 🔴 Critical | Bug | WAF bypass 200 OK logged without any attack payload (false positive) | `main.py` | 227–250 |
-| G03 | 🔴 Critical | Bug | Confirmed bypass mutations never forwarded to dalfox/sqlmap/ffuf | `main.py` | 253–266, 356–386 |
-| G04 | 🟠 High | Architecture | Pipeline is all-or-nothing — one stage exception aborts everything | `main.py` | 523–536 |
-| G05 | 🟠 High | Architecture | No resume/skip — re-runs repeat all stages from scratch | `main.py` | 273–386 |
-| G06 | 🟠 High | Testing | Zero unit tests for `main.py` (541 lines, all core logic) | `tests/` | — |
-| G07 | 🟠 High | Correctness | `waybackpy -ku` flag may not exist in installed version | `main.py` | 292–297 |
-| G08 | 🟠 High | Correctness | `ffuf -t 50` (50 threads) is incompatible with Tor anonymization | `main.py` | 305–308 |
-| G09 | 🟠 High | Correctness | `build_param_urls` does not deduplicate — thousands of dupes fed to scanners | `main.py` | 323–330 |
-| G10 | 🟡 Medium | Architecture | All config is CLI-only; no persistent config file | `main.py` | 494–510 |
-| G11 | 🟡 Medium | Architecture | `check_tools()` treats optional tools as required — aborts if any missing | `main.py` | 393–408 |
-| G12 | 🟡 Medium | Architecture | Nuclei template path guessing silently scans nothing if paths miss | `main.py` | 312–320 |
-| G13 | 🟡 Medium | Correctness | `fuzz_dirs_ffuf` logs "done" even when no live hosts exist | `main.py` | 300–309 |
-| G14 | 🟡 Medium | Security | ParamSpider runs without Tor/proxychains — real IP exposed to Wayback | `main.py` | 336 |
-| G15 | 🟡 Medium | UX | No per-stage timing — operators cannot identify bottlenecks | `main.py` | 523–536 |
-| G16 | 🟡 Medium | UX | No `--stages` flag — cannot selectively run/skip pipeline stages | `main.py` | 494–510 |
-| G17 | 🟡 Medium | Report | HTML report counts FFUF CSV files, not actual discovered paths | `report.py` | 49–57 |
-| G18 | 🟢 Low | Packaging | Module imports assume CWD — tool breaks when installed via pip | `main.py`, `pyproject.toml` | 48–51 |
-| G19 | 🟢 Low | Testing | `_stage/test_v1.py` and `_stage/test_v2.py` are dead, never run by CI | `_stage/` | — |
-| G20 | 🟢 Low | Docs | `TOR_CONTROL_PASSWORD` env var is buried in README, missing startup warning | `README.md`, `main.py` | — |
+| ID | Severity | Category | Short Description | Status | File(s) |
+|----|----------|----------|-------------------|--------|---------|
+| G01 | 🔴 Critical | Bug | ParamSpider file lookup always fails — 0 URLs ever merged | ✅ Fixed | `main.py` |
+| G02 | 🔴 Critical | Bug | WAF bypass 200 OK logged without any attack payload (false positive) | ✅ Fixed | `main.py` |
+| G03 | 🔴 Critical | Bug | Confirmed bypass mutations never forwarded to dalfox/sqlmap/ffuf | ✅ Fixed | `main.py` |
+| G21 | 🔴 Critical | Bug / Env | `httpx` collision on Debian/Kali (`python3-httpx` vs ProjectDiscovery) | ✅ Fixed | `main.py` |
+| G04 | 🟠 High | Architecture | Pipeline is all-or-nothing — one stage exception aborts everything | ⏳ Pending | `main.py` |
+| G05 | 🟠 High | Architecture | No resume/skip — re-runs repeat all stages from scratch | ⏳ Pending | `main.py` |
+| G06 | 🟠 High | Testing | Zero unit tests for `main.py` (541 lines, all core logic) | 🔄 In Progress | `tests/` |
+| G07 | 🟠 High | Correctness | `waybackpy -ku` flag verified present, but missing `-sub` (skips subdomains) | ⏳ Pending | `main.py` |
+| G08 | 🟠 High | Correctness | `ffuf -t 50` (50 threads) is incompatible with Tor anonymization | ⏳ Pending | `main.py` |
+| G22 | 🟠 High | Architecture / Security | `proxychains` LD_PRELOAD risks DNS leaks & Go static binary failure; native SOCKS5 available | ⏳ Pending | `main.py` |
+| G09 | 🟠 High | Correctness | `build_param_urls` does not deduplicate — thousands of dupes fed to scanners | ⏳ Pending | `main.py` |
+| G10 | 🟡 Medium | Architecture | All config is CLI-only; no persistent config file | ⏳ Pending | `main.py` |
+| G11 | 🟡 Medium | Architecture | `check_tools()` treats optional tools as required — aborts if any missing | ⏳ Pending | `main.py` |
+| G12 | 🟡 Medium | Architecture | Nuclei template path guessing silently scans nothing if paths miss | ⏳ Pending | `main.py` |
+| G13 | 🟡 Medium | Correctness | `fuzz_dirs_ffuf` logs "done" even when no live hosts exist | ⏳ Pending | `main.py` |
+| G14 | 🟡 Medium | Security | ParamSpider runs without Tor/proxychains — real IP exposed to Wayback | ✅ Fixed | `main.py` |
+| G15 | 🟡 Medium | UX | No per-stage timing — operators cannot identify bottlenecks | ⏳ Pending | `main.py` |
+| G16 | 🟡 Medium | UX | No `--stages` flag — cannot selectively run/skip pipeline stages | ⏳ Pending | `main.py` |
+| G17 | 🟡 Medium | Report | HTML report counts FFUF CSV files, not actual discovered paths | ⏳ Pending | `report.py` |
+| G23 | 🟡 Medium | Tooling | `katana` crawler and `gau`/`waybackurls` available in system, superior to ParamSpider | ⏳ Pending | Architecture |
+| G18 | 🟢 Low | Packaging | Module imports assume CWD — tool breaks when installed via pip | ⏳ Pending | `main.py`, `pyproject.toml` |
+| G19 | 🟢 Low | Testing | `_stage/test_v1.py` and `_stage/test_v2.py` are dead, never run by CI | ⏳ Pending | `_stage/` |
+| G20 | 🟢 Low | Docs | `TOR_CONTROL_PASSWORD` env var is buried in README, missing startup warning | ⏳ Pending | `README.md`, `main.py` |
+
+---
+
+## Architectural Alternatives & Tech Stack Evaluation
+
+Following the project review and confirmation that we are not locked into the legacy code structure, three architectural directions are evaluated:
+
+### 1. Incremental Hardening of Current Engine (v2.x)
+* **Design**: Keep synchronous procedural script structure, fixing immediate defects (P1 & P2).
+* **Pros**: Low risk, zero rewrite overhead, passes all current tests, immediate delivery.
+* **Cons**: Remains single-threaded batch execution (stage N must complete before stage N+1 starts).
+
+### 2. Async Event-Driven Python Pipeline (v3.0) — *Recommended*
+* **Design**: Rebuild into `src/shadowrecon` with `asyncio`.
+* **Key Benefits**:
+  - **Streaming Queue**: As soon as `httpx-toolkit` identifies a live host, `katana` and `ffuf` start fuzzing immediately without waiting for thousands of other subdomains to finish.
+  - **Native SOCKS5**: Removes `proxychains` wrappers and passes native `-x socks5://...` or `--proxy` flags directly to `httpx`, `ffuf`, `nuclei`, `dalfox`, `sqlmap`, preventing DNS leaks and LD_PRELOAD incompatibilities.
+  - **Modern Recon Engine**: Replaces fragile legacy scrapers (`paramspider`) with ProjectDiscovery's `katana` crawler (which executes JS and parses DOM) and `gau`/`waybackurls`.
+  - **SQLite Run Cache**: Enables instant pause/resume, deduplication, and structured querying.
+
+### 3. Pure Go Pipeline
+* **Design**: Rewrite the core in Go with goroutines and channels.
+* **Pros**: Native Go binaries (`subfinder`, `httpx`, `nuclei`) can be tightly integrated.
+* **Cons**: Must still wrap external Python processes for `sqlmap`, `wafw00f`, and Tor circuit control (`stem`), negating the single-binary advantage.
 
 ---
 
