@@ -47,6 +47,18 @@ class BypassContext:
         return args
 
 
+def default_nuclei_templates_dir() -> Path:
+    """Find default nuclei templates directory, checking ~/.local/nuclei-templates (v3) or ~/nuclei-templates."""
+    candidates = [
+        Path.home() / ".local" / "nuclei-templates",
+        Path.home() / "nuclei-templates",
+    ]
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return candidates[0]
+
+
 @dataclass
 class Config:
     target: str
@@ -71,7 +83,7 @@ class Config:
     force_rerun: bool = False
     stages: str = "all"
     skip_stages: str = ""
-    nuclei_templates: Path = field(default_factory=lambda: Path.home() / "nuclei-templates")
+    nuclei_templates: Path = field(default_factory=default_nuclei_templates_dir)
     nuclei_severity: str = "medium,high,critical"
     nuclei_tags: str = ""
 

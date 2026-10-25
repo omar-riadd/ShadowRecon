@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shadowrecon import __version__
-from shadowrecon.config import BypassContext, Config, load_toml_config
+from shadowrecon.config import BypassContext, Config, default_nuclei_templates_dir, load_toml_config
 from shadowrecon.core.executor import AsyncExecutor, resolve_binary
 from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorProxyProvider
 from shadowrecon.core.ratelimit import AdaptiveRateLimiter
@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--threads", type=int, default=5, help="FFUF thread count (low default for Tor)")
     p.add_argument("--severity", "--nuclei-severity", dest="nuclei_severity", default="medium,high,critical", help="Nuclei CVSS severity filter (default: medium,high,critical)")
     p.add_argument("--tags", "--nuclei-tags", dest="nuclei_tags", default="", help="Nuclei template tags filter (e.g. cve,misconfig,exposure)")
-    p.add_argument("--nuclei-templates", help="Path to nuclei-templates directory (default: ~/nuclei-templates)")
+    p.add_argument("--nuclei-templates", help="Path to nuclei-templates directory (default: ~/.local/nuclei-templates or ~/nuclei-templates)")
     p.add_argument("--config", help="Path to shadowrecon.toml config file")
     p.add_argument("--dry-run", action="store_true", help="Simulate execution without sending live packets")
     p.add_argument("--proxy-provider", default="tor", choices=["tor", "pool", "direct"], help="Proxy provider to use (default: tor)")
@@ -184,7 +184,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     max_backoff = args.max_backoff or toml_cfg.get("max_backoff", 60.0)
 
     nuclei_tmpl = Path(args.nuclei_templates).resolve() if args.nuclei_templates else (
-        Path(toml_cfg["nuclei_templates"]).resolve() if toml_cfg.get("nuclei_templates") else Path.home() / "nuclei-templates"
+        Path(toml_cfg["nuclei_templates"]).resolve() if toml_cfg.get("nuclei_templates") else default_nuclei_templates_dir()
     )
     nuclei_sev = args.nuclei_severity or toml_cfg.get("nuclei_severity", "medium,high,critical")
     nuclei_tags = args.nuclei_tags or toml_cfg.get("nuclei_tags", "")
