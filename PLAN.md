@@ -278,9 +278,9 @@ To prevent breaking existing user scripts, configurations, or CI pipelines:
 
 ## 6. Definition of Done (v3.4.0)
 
-* [ ] Root `main.py` is reduced to a clean 20-line delegation shim with zero deprecated code.
-* [ ] Tor proxy configurations normalize to `socks5h://` with remote DNS resolution verified.
-* [ ] Duplicate findings are eliminated via unique fingerprinting in `SessionStore`.
+* [x] Root `main.py` is reduced to a clean bootstrap shim with zero deprecated code.
+* [x] Tor proxy configurations normalize to `socks5h://` with remote DNS resolution verified.
+* [x] Duplicate findings are eliminated via unique fingerprinting in `SessionStore`.
 * [ ] Dalfox, FFUF, and SQLMap concurrency dynamically scale with `--concurrency`.
 * [ ] WAF module supports query/payload encoding mutations and passes `--tamper` to SQLMap.
 * [ ] True streaming mode allows crawling and probing to run concurrently.
