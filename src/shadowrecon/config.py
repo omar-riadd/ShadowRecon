@@ -61,9 +61,12 @@ class Config:
     max_retries: int = 5
     request_timeout: int = 20
     rate_limit: float = 0.0
+    max_backoff: float = 60.0
     ffuf_threads: int = 5
     dry_run: bool = False
     use_proxy: bool = True
+    proxy_provider: str = "tor"
+    proxy_pool_file: Optional[Path] = None
     make_report: bool = True
     force_rerun: bool = False
     stages: str = "all"

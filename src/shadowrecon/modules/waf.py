@@ -51,8 +51,9 @@ def _sync_http_request(
     url: str,
     headers: Optional[Dict[str, str]] = None,
     data: Optional[Any] = None,
+    proxy_provider: Optional[Any] = None,
 ) -> Tuple[int, int]:
-    """Execute a single HTTP request through Tor proxy synchronously."""
+    """Execute a single HTTP request through proxy synchronously."""
     if not is_in_scope(url, cfg.domain):
         raise ValueError(f"Refusing out-of-scope request: {url}")
 
@@ -60,7 +61,12 @@ def _sync_http_request(
         log.info("[dry-run] %s %s", method, url)
         return 200, 0
 
-    proxies = cfg.proxies if cfg.use_proxy else None
+    proxies = None
+    if cfg.use_proxy:
+        proxy_url = proxy_provider.get_proxy_url() if proxy_provider else cfg.tor_socks
+        if proxy_url:
+            proxies = {"http": proxy_url, "https": proxy_url}
+
     resp = requests.request(
         method=method,
         url=url,
@@ -80,10 +86,22 @@ async def execute_http_probe(
     headers: Optional[Dict[str, str]] = None,
     data: Optional[Any] = None,
 ) -> Tuple[int, int]:
-    """Asynchronously probe an HTTP endpoint without blocking the event loop."""
-    return await asyncio.to_thread(
-        _sync_http_request, ctx.config, method, url, headers, data
+    """Asynchronously probe an HTTP endpoint with adaptive rate-limiting and proxy routing."""
+    if ctx.rate_limiter:
+        await ctx.rate_limiter.acquire()
+
+    code, body_len = await asyncio.to_thread(
+        _sync_http_request, ctx.config, method, url, headers, data, ctx.proxy_provider
     )
+
+    if ctx.rate_limiter:
+        ctx.rate_limiter.record_response(code)
+        if ctx.rate_limiter.should_rotate_ip and ctx.proxy_provider:
+            log.warning("Rate limit sustained; rotating proxy provider ...")
+            await ctx.proxy_provider.rotate()
+            ctx.rate_limiter.reset_blocks()
+
+    return code, body_len
 
 
 async def run_waf_stage(ctx: StageContext) -> BypassContext:

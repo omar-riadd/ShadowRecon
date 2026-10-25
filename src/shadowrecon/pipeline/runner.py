@@ -65,6 +65,8 @@ class StageContext:
     bus: AsyncEventBus
     tor: TorManager
     bypass_context: BypassContext
+    rate_limiter: Optional[Any] = None
+    proxy_provider: Optional[Any] = None
 
 
 StageCallable = Callable[[StageContext], Coroutine[Any, Any, Any]]

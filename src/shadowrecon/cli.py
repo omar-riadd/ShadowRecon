@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional
 from shadowrecon import __version__
 from shadowrecon.config import BypassContext, Config, load_toml_config
 from shadowrecon.core.executor import AsyncExecutor, resolve_binary
+from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorProxyProvider
+from shadowrecon.core.ratelimit import AdaptiveRateLimiter
 from shadowrecon.core.scope import parse_target, slugify
 from shadowrecon.core.tor import TorManager
 from shadowrecon.modules.recon import (
@@ -117,9 +119,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rotate-wait", type=int, default=10, help="Wait time (seconds) after circuit rotation")
     p.add_argument("--timeout", type=int, default=20, help="HTTP request timeout in seconds")
     p.add_argument("--rate-limit", type=float, default=0.0, help="Delay between requests in seconds")
+    p.add_argument("--max-backoff", type=float, default=60.0, help="Maximum exponential backoff in seconds (default: 60)")
     p.add_argument("--threads", type=int, default=5, help="FFUF thread count (low default for Tor)")
     p.add_argument("--config", help="Path to shadowrecon.toml config file")
     p.add_argument("--dry-run", action="store_true", help="Simulate execution without sending live packets")
+    p.add_argument("--proxy-provider", default="tor", choices=["tor", "pool", "direct"], help="Proxy provider to use (default: tor)")
+    p.add_argument("--proxy-pool", dest="proxy_pool_file", help="Path to file containing rotating proxy URLs")
     p.add_argument("--no-proxy", action="store_true", help="Disable SOCKS proxy routing")
     p.add_argument("--no-report", action="store_true", help="Skip HTML report generation")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
@@ -168,6 +173,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
 
     lfi_file = Path(args.lfi_payloads).resolve() if args.lfi_payloads else None
 
+    proxy_provider_choice = args.proxy_provider or toml_cfg.get("proxy_provider", "tor")
+    pool_file = Path(args.proxy_pool_file).resolve() if args.proxy_pool_file else (
+        Path(toml_cfg["proxy_pool_file"]).resolve() if toml_cfg.get("proxy_pool_file") else None
+    )
+    max_backoff = args.max_backoff or toml_cfg.get("max_backoff", 60.0)
+
     # Construct Config
     cfg = Config(
         target=target_url,
@@ -181,23 +192,47 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         rotate_wait=args.rotate_wait,
         request_timeout=args.timeout,
         rate_limit=args.rate_limit,
+        max_backoff=max_backoff,
         ffuf_threads=args.threads,
         dry_run=args.dry_run,
         use_proxy=not args.no_proxy,
+        proxy_provider=proxy_provider_choice,
+        proxy_pool_file=pool_file,
         make_report=not args.no_report,
         force_rerun=args.force_rerun,
         stages=args.stages,
         skip_stages=args.skip_stages,
     )
 
+    # Initialize Proxy Provider
+    tor = TorManager(
+        control_port=cfg.tor_control_port,
+        control_password=cfg.tor_control_password,
+        rotate_wait=cfg.rotate_wait,
+        dry_run=cfg.dry_run,
+    )
+
+    if not cfg.use_proxy or cfg.proxy_provider == "direct":
+        proxy_provider = DirectProxyProvider()
+    elif cfg.proxy_pool_file and cfg.proxy_pool_file.is_file():
+        proxy_provider = ProxyPoolProvider.from_file(cfg.proxy_pool_file)
+    else:
+        proxy_provider = TorProxyProvider(tor, socks_url=cfg.tor_socks)
+
+    # Initialize Adaptive Rate Limiter
+    rate_limiter = AdaptiveRateLimiter(
+        baseline_delay=cfg.rate_limit,
+        max_backoff=cfg.max_backoff,
+    )
+
     print(BANNER)
     log.info("ShadowRecon v%s initialized", __version__)
     log.info("Target: %s (domain: %s)", cfg.target, cfg.domain)
     log.info("Output directory: %s", cfg.outdir)
-    log.info("Proxy: %s (enabled=%s)", cfg.tor_socks, cfg.use_proxy)
+    log.info("Proxy Provider: %s (active: %s)", proxy_provider.provider_name, proxy_provider.get_proxy_url() or "none")
 
     # Tor Control Password check (P3.4)
-    if not cfg.dry_run and cfg.use_proxy and not cfg.tor_control_password:
+    if not cfg.dry_run and cfg.use_proxy and cfg.proxy_provider == "tor" and not cfg.tor_control_password:
         log.warning(
             "No Tor control password provided (set TOR_CONTROL_PASSWORD or --tor-pass). "
             "Circuit rotation on 403/429 block will be unavailable."
@@ -211,6 +246,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     # Verify tooling
     check_tooling(cfg.dry_run)
 
+    # Verify proxy health
+    if cfg.use_proxy and not cfg.dry_run:
+        healthy = await proxy_provider.health_check()
+        if not healthy:
+            log.warning("Proxy provider '%s' failed initial health check; check network/proxy settings.", proxy_provider.provider_name)
+
     # Initialize State & Session
     db_path = cfg.outdir / "session.db"
     store = SessionStore(db_path)
@@ -220,15 +261,10 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     store.set_metadata("start_time", datetime.now().isoformat())
 
     executor = AsyncExecutor(
-        socks_proxy=cfg.tor_socks,
+        socks_proxy=proxy_provider.get_proxy_url() or cfg.tor_socks,
         use_proxy=cfg.use_proxy,
         dry_run=cfg.dry_run,
-    )
-    tor = TorManager(
-        control_port=cfg.tor_control_port,
-        control_password=cfg.tor_control_password,
-        rotate_wait=cfg.rotate_wait,
-        dry_run=cfg.dry_run,
+        proxy_provider=proxy_provider,
     )
     bus = AsyncEventBus()
     bypass_ctx = BypassContext()
@@ -240,6 +276,8 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         bus=bus,
         tor=tor,
         bypass_context=bypass_ctx,
+        rate_limiter=rate_limiter,
+        proxy_provider=proxy_provider,
     )
 
     # Stage Lifecycle Callbacks

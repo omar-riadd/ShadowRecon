@@ -67,3 +67,5 @@ class TorManager:
         if success and not self.dry_run and self.rotate_wait > 0:
             await asyncio.sleep(self.rotate_wait)
         return success
+
+    rotate = rotate_circuit

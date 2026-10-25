@@ -7,7 +7,7 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 log = logging.getLogger("shadowrecon.executor")
 
@@ -56,7 +56,7 @@ def inject_native_proxy(cmd: Sequence[str], socks_url: str) -> List[str]:
     # Check tool and append its native proxy flag
     if tool in ("httpx", "httpx-toolkit"):
         return [full_cmd[0], "-http-proxy", socks_url, *full_cmd[1:]]
-    if tool == "ffuf":
+    if tool in ("ffuf", "curl"):
         return [full_cmd[0], "-x", socks_url, *full_cmd[1:]]
     if tool == "nuclei":
         return [full_cmd[0], "-proxy-socks-url", socks_url, *full_cmd[1:]]
@@ -76,10 +76,12 @@ class AsyncExecutor:
         socks_proxy: str = "socks5://127.0.0.1:9050",
         use_proxy: bool = True,
         dry_run: bool = False,
+        proxy_provider: Optional[Any] = None,
     ) -> None:
         self.socks_proxy = socks_proxy
         self.use_proxy = use_proxy
         self.dry_run = dry_run
+        self.proxy_provider = proxy_provider
 
     async def run(
         self,
@@ -96,7 +98,9 @@ class AsyncExecutor:
         cmd = [tool_resolved, *args[1:]]
 
         if proxy and self.use_proxy:
-            cmd = inject_native_proxy(cmd, self.socks_proxy)
+            active_proxy = self.proxy_provider.get_proxy_url() if self.proxy_provider else self.socks_proxy
+            if active_proxy:
+                cmd = inject_native_proxy(cmd, active_proxy)
 
         printable = " ".join(cmd)
         log.info("$ %s", printable)
