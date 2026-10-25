@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -92,8 +93,93 @@ class Config:
         return {"http": self.tor_socks, "https": self.tor_socks}
 
 
-def load_toml_config(config_path: Optional[Path]) -> Dict[str, Any]:
-    """Load configuration from a TOML file if present."""
+class ConfigValidationError(ValueError):
+    """Raised when shadowrecon.toml configuration fails schema validation."""
+    pass
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)")
+
+
+def interpolate_env_vars(data: Any) -> Any:
+    """Recursively interpolate ${VAR} and $VAR environment variable references."""
+    if isinstance(data, dict):
+        return {k: interpolate_env_vars(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [interpolate_env_vars(item) for item in data]
+    if isinstance(data, str):
+        def repl(match: re.Match) -> str:
+            var_name = match.group(1) or match.group(2)
+            return os.getenv(var_name, "")
+        return _ENV_VAR_PATTERN.sub(repl, data)
+    return data
+
+
+# Schema definition: key -> (allowed_types, optional_validator_callable, human_description)
+TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[Any], bool]], str]] = {
+    "target": (str, None, "Target URL"),
+    "domain": (str, None, "Target domain"),
+    "wordlist": (str, None, "Path to fuzzing wordlist"),
+    "outdir": (str, None, "Output directory path"),
+    "lfi_payloads": (str, None, "Path to LFI payloads"),
+    "tor_socks": (str, None, "Tor SOCKS5 proxy URL"),
+    "socks": (str, None, "Tor SOCKS5 proxy URL (alias for tor_socks)"),
+    "tor_control_port": (int, lambda v: 1 <= v <= 65535, "Tor control port (1-65535)"),
+    "tor_port": (int, lambda v: 1 <= v <= 65535, "Tor control port (alias for tor_control_port)"),
+    "tor_control_password": (str, None, "Tor control password"),
+    "tor_pass": (str, None, "Tor control password (alias for tor_control_password)"),
+    "rotate_wait": (int, lambda v: v >= 0, "Circuit rotation delay (seconds >= 0)"),
+    "max_retries": (int, lambda v: v >= 1, "Maximum retries (>= 1)"),
+    "request_timeout": (int, lambda v: v > 0, "Request timeout (seconds > 0)"),
+    "timeout": (int, lambda v: v > 0, "Request timeout (alias for request_timeout)"),
+    "rate_limit": ((int, float), lambda v: v >= 0, "Request delay (seconds >= 0)"),
+    "max_backoff": ((int, float), lambda v: v >= 0, "Max backoff (seconds >= 0)"),
+    "ffuf_threads": (int, lambda v: v >= 1, "FFUF threads (>= 1)"),
+    "threads": (int, lambda v: v >= 1, "Thread count (alias for ffuf_threads)"),
+    "dry_run": (bool, None, "Dry run flag"),
+    "use_proxy": (bool, None, "Use proxy routing flag"),
+    "proxy_provider": (str, lambda v: v in ("tor", "pool", "direct"), "Proxy provider ('tor', 'pool', 'direct')"),
+    "proxy_pool_file": (str, None, "Path to rotating proxy pool file"),
+    "make_report": (bool, None, "HTML report flag"),
+    "force_rerun": (bool, None, "Force rerun stages flag"),
+    "stages": (str, None, "Comma-separated stages"),
+    "skip_stages": (str, None, "Comma-separated skip stages"),
+    "nuclei_templates": (str, None, "Path to nuclei templates directory"),
+    "nuclei_severity": (str, None, "Nuclei severity filter"),
+    "nuclei_tags": (str, None, "Nuclei tags filter"),
+    "export_sarif": (str, None, "SARIF export path"),
+    "export_json": (str, None, "JSON export path"),
+    "export_csv": (str, None, "CSV export directory"),
+    "diff": (str, None, "Prior session.db path for diffing"),
+}
+
+
+def validate_toml_config(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a parsed configuration dictionary against the TOML schema."""
+    for key, value in cfg.items():
+        if key not in TOML_SCHEMA:
+            raise ConfigValidationError(
+                f"Unknown configuration key '{key}' in shadowrecon.toml. "
+                f"Valid keys are: {', '.join(sorted(TOML_SCHEMA.keys()))}"
+            )
+
+        expected_type, validator, desc = TOML_SCHEMA[key]
+        if not isinstance(value, expected_type):
+            type_name = expected_type.__name__ if isinstance(expected_type, type) else "/".join(t.__name__ for t in expected_type)
+            raise ConfigValidationError(
+                f"Invalid type for key '{key}': expected {type_name}, got {type(value).__name__} ({value!r})"
+            )
+
+        if validator is not None and not validator(value):
+            raise ConfigValidationError(
+                f"Validation failed for key '{key}' with value {value!r}. Requirement: {desc}"
+            )
+
+    return cfg
+
+
+def load_toml_config(config_path: Optional[Path], strict: bool = True) -> Dict[str, Any]:
+    """Load, interpolate, and validate configuration from a TOML file."""
     if config_path is None:
         default_path = Path("shadowrecon.toml")
         if default_path.is_file():
@@ -107,6 +193,14 @@ def load_toml_config(config_path: Optional[Path]) -> Dict[str, Any]:
     try:
         with config_path.open("rb") as f:
             data = tomllib.load(f)
-            return data.get("shadowrecon", data)
-    except Exception:
+            section = data.get("shadowrecon", data)
+    except Exception as exc:
+        if strict:
+            raise ConfigValidationError(f"Failed to parse TOML syntax in '{config_path}': {exc}") from exc
         return {}
+
+    interpolated = interpolate_env_vars(section)
+    if strict and isinstance(interpolated, dict):
+        validate_toml_config(interpolated)
+
+    return interpolated

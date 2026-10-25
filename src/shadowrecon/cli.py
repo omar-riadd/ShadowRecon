@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shadowrecon import __version__
-from shadowrecon.config import BypassContext, Config, default_nuclei_templates_dir, load_toml_config
+from shadowrecon.config import BypassContext, Config, ConfigValidationError, default_nuclei_templates_dir, load_toml_config
 from shadowrecon.core.executor import AsyncExecutor, resolve_binary
 from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorProxyProvider
 from shadowrecon.core.ratelimit import AdaptiveRateLimiter
@@ -156,7 +156,11 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
 
     # 1. Load config file if specified or default present
     cfg_file = Path(args.config) if args.config else None
-    toml_cfg = load_toml_config(cfg_file)
+    try:
+        toml_cfg = load_toml_config(cfg_file)
+    except ConfigValidationError as exc:
+        log.error("Configuration validation error: %s", exc)
+        return 1
 
     target_url = args.target or toml_cfg.get("target")
     if not target_url:
