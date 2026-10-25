@@ -20,26 +20,39 @@ class BypassContext:
     headers: Dict[str, str] = field(default_factory=dict)
     method_override: str = ""
     desc: str = "none"
+    tamper_scripts: List[str] = field(default_factory=list)
+    waf_name: str = ""
 
     @classmethod
-    def from_payload(cls, p: dict) -> "BypassContext":
+    def from_payload(cls, p: dict, waf_name: str = "") -> "BypassContext":
+        tampers = list(p.get("tamper_scripts", []))
+        if not tampers and waf_name:
+            from shadowrecon.waf_payloads import get_recommended_tampers
+            tampers = get_recommended_tampers(waf_name)
         return cls(
             headers=p.get("headers", {}),
             method_override=p.get("method", ""),
             desc=p.get("desc", ""),
+            tamper_scripts=tampers,
+            waf_name=waf_name,
         )
 
     def dalfox_args(self) -> List[str]:
         args = []
         for k, v in self.headers.items():
             args.extend(["--header", f"{k}: {v}"])
+        if any(t in self.desc.lower() for t in ("double", "encode", "waf")):
+            args.append("--waf-bypass")
         return args
 
     def sqlmap_args(self) -> List[str]:
-        if not self.headers:
-            return []
-        header_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
-        return ["--headers", header_str]
+        args = []
+        if self.headers:
+            header_str = "\n".join(f"{k}: {v}" for k, v in self.headers.items())
+            args.extend(["--headers", header_str])
+        if self.tamper_scripts:
+            args.append(f"--tamper={','.join(self.tamper_scripts)}")
+        return args
 
     def ffuf_args(self) -> List[str]:
         args = []

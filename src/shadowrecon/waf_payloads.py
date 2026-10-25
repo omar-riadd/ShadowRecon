@@ -9,11 +9,40 @@ registry. Nothing was added, sharpened, or made more effective.
 Each builder takes the target URL and returns a list of payload dicts:
     {"desc": str, "url"?: str, "method"?: str, "headers"?: dict, "data"?: str}
 """
-from urllib.parse import urlparse
+import urllib.parse
+from typing import Dict, List
+
+
+def url_double_encode(payload: str) -> str:
+    """Double URL-encode sensitive / reserved characters (%27 -> %2527)."""
+    return urllib.parse.quote(urllib.parse.quote(payload, safe=""), safe="")
+
+
+def sql_comment_inline(payload: str) -> str:
+    """Inline comment mutation: replaces whitespace with SQL comments (/**/)."""
+    return payload.replace(" ", "/**/")
+
+
+def case_alternate(payload: str) -> str:
+    """Case alternation mutation: alternates upper and lower case letters."""
+    return "".join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(payload))
+
+
+def unicode_normalize_encode(payload: str) -> str:
+    """Unicode full-width mutation for sensitive syntax tokens."""
+    translation = {
+        "'": "\uff07",  # fullwidth apostrophe
+        '"': "\uff02",  # fullwidth quotation mark
+        "<": "\uff1c",  # fullwidth less-than
+        ">": "\uff1e",  # fullwidth greater-than
+        "=": "\uff1d",  # fullwidth equals
+        "/": "\uff0f",  # fullwidth slash
+    }
+    return "".join(translation.get(c, c) for c in payload)
 
 
 def mutate_path(url: str, new_segment: str) -> str:
-    p = urlparse(url)
+    p = urllib.parse.urlparse(url)
     new_path = "/" + new_segment.strip("/") + "/" + p.path.lstrip("/")
     return p._replace(path=new_path).geturl()
 
@@ -245,3 +274,31 @@ BYPASS = {
     "SafeDog": safedog,
     "NAXSI": naxsi,
 }
+
+
+# WAF vendor mapping to recommended SQLMap tamper scripts
+WAF_TAMPER_MAP: Dict[str, List[str]] = {
+    "cloudflare": ["between", "randomcase", "space2comment"],
+    "aws": ["space2comment", "equaltolike", "randomcase"],
+    "modsecurity": ["modsecurityversioned", "modsecurityzeroversioned"],
+    "incapsula": ["charencode", "space2plus"],
+    "imperva": ["charencode", "space2plus"],
+    "sucuri": ["space2comment", "unionalltounion"],
+    "barracuda": ["space2comment", "randomcase"],
+    "fortiweb": ["space2comment", "randomcase"],
+    "f5": ["space2plus", "randomcase"],
+    "big-ip": ["space2plus", "randomcase"],
+    "akamai": ["space2comment", "between"],
+    "kona": ["space2comment", "between"],
+}
+
+
+def get_recommended_tampers(waf_name: str) -> List[str]:
+    """Return recommended SQLMap tamper scripts for a detected WAF product name."""
+    if not waf_name:
+        return []
+    target = waf_name.lower()
+    for key, tampers in WAF_TAMPER_MAP.items():
+        if key in target:
+            return list(tampers)
+    return []

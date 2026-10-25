@@ -92,6 +92,46 @@ class TestV3WafModule(unittest.IsolatedAsyncioTestCase):
                 bypasses = store.get_waf_bypasses()
                 confirmed = [b for b in bypasses if b.get("confirmed")]
                 self.assertTrue(len(confirmed) > 0)
+                self.assertIn("between", bypass.tamper_scripts)
+                self.assertIn("--tamper=between,randomcase,space2comment", bypass.sqlmap_args())
+
+    def test_waf_mutation_encoding_helpers(self):
+        from shadowrecon.waf_payloads import (
+            case_alternate,
+            sql_comment_inline,
+            unicode_normalize_encode,
+            url_double_encode,
+        )
+        self.assertEqual(url_double_encode("1'"), "1%2527")
+        self.assertEqual(sql_comment_inline("SELECT * FROM users"), "SELECT/**/*/**/FROM/**/users")
+        alt = case_alternate("select")
+        self.assertEqual(alt, "SeLeCt")
+        norm = unicode_normalize_encode("admin' OR '1'='1")
+        self.assertIn("\uff07", norm)
+        self.assertNotIn("'", norm)
+
+    def test_get_recommended_tampers(self):
+        from shadowrecon.waf_payloads import get_recommended_tampers
+        cf_tampers = get_recommended_tampers("Cloudflare (Cloudflare Inc.)")
+        self.assertEqual(cf_tampers, ["between", "randomcase", "space2comment"])
+
+        aws_tampers = get_recommended_tampers("AWS Elastic Load Balancer")
+        self.assertEqual(aws_tampers, ["space2comment", "equaltolike", "randomcase"])
+
+        modsec_tampers = get_recommended_tampers("ModSecurity")
+        self.assertEqual(modsec_tampers, ["modsecurityversioned", "modsecurityzeroversioned"])
+
+        empty_tampers = get_recommended_tampers("Unknown Nonexistent WAF")
+        self.assertEqual(empty_tampers, [])
+
+    def test_bypass_context_sqlmap_args_with_tampers(self):
+        ctx = BypassContext(
+            headers={"X-Forwarded-For": "127.0.0.1"},
+            tamper_scripts=["between", "space2comment"],
+        )
+        args = ctx.sqlmap_args()
+        self.assertIn("--headers", args)
+        self.assertIn("--tamper=between,space2comment", args)
 
 
 class TestV3ReconModule(unittest.IsolatedAsyncioTestCase):

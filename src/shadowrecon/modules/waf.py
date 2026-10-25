@@ -203,9 +203,16 @@ async def run_waf_stage(ctx: StageContext) -> BypassContext:
             )
 
     if best_bypass is not None:
+        best_bypass.waf_name = waf_name or ""
+        if not best_bypass.tamper_scripts and waf_name:
+            best_bypass.tamper_scripts = waf_payloads.get_recommended_tampers(waf_name)
         ctx.bypass_context = best_bypass
-        log.info("Propagating confirmed WAF bypass to scanners: %s (%s)", best_bypass.desc, best_bypass.headers)
+        log.info("Propagating confirmed WAF bypass to scanners: %s (%s, tampers=%s)", best_bypass.desc, best_bypass.headers, best_bypass.tamper_scripts)
     else:
+        if waf_name:
+            ctx.bypass_context.waf_name = waf_name
+            ctx.bypass_context.tamper_scripts = waf_payloads.get_recommended_tampers(waf_name)
+            log.info("Applied vendor tamper scripts for detected WAF '%s': %s", waf_name, ctx.bypass_context.tamper_scripts)
         if not baseline_blocked:
             log.info("Target did not block active baseline probe; no WAF bypass required.")
         else:
