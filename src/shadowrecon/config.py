@@ -98,6 +98,9 @@ class Config:
     export_pdf: Optional[Path] = None
     webhook_url: Optional[str] = None
     webhook_events: str = "complete,critical"
+    circuit_breaker: bool = True
+    circuit_threshold: int = 5
+    circuit_recovery: float = 30.0
 
     @property
     def proxies(self) -> dict:
@@ -173,6 +176,9 @@ TOML_SCHEMA: Dict[str, Tuple[Union[type, Tuple[type, ...]], Optional[Callable[[A
     "export_pdf": (str, None, "Executive PDF report export path"),
     "webhook_url": (str, None, "Slack, Discord, or generic webhook URL"),
     "webhook_events": (str, None, "Comma-separated webhook event triggers (complete, critical)"),
+    "circuit_breaker": (bool, None, "Enable per-host circuit breaker"),
+    "circuit_threshold": (int, lambda v: v >= 1, "Consecutive failure threshold before tripping circuit (>= 1)"),
+    "circuit_recovery": ((int, float), lambda v: v > 0, "Cool-down recovery window in seconds (> 0)"),
 }
 
 

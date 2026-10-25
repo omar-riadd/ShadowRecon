@@ -136,8 +136,11 @@ async def run_urls_stage(ctx: StageContext) -> List[str]:
 async def run_fuzzing_stage(ctx: StageContext) -> None:
     """Run directory and endpoint fuzzing via FFUF."""
     hosts = ctx.store.get_hosts()
+    if ctx.circuit_breaker:
+        hosts = ctx.circuit_breaker.filter_healthy_hosts(hosts)
+
     if not hosts:
-        log.info("No live hosts available for directory fuzzing. Skipping.")
+        log.info("No live or healthy hosts available for directory fuzzing. Skipping.")
         return
 
     if not ctx.config.wordlist.is_file():

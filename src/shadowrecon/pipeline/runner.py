@@ -1,6 +1,7 @@
 """Pipeline stage runner with isolated error handling, stage filtering, and resume."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -67,6 +68,7 @@ class StageContext:
     bypass_context: BypassContext
     rate_limiter: Optional[Any] = None
     proxy_provider: Optional[Any] = None
+    circuit_breaker: Optional[Any] = None
     drivers: Optional[Any] = None
 
     def __post_init__(self) -> None:
@@ -146,6 +148,26 @@ class PipelineRunner:
                 res = StageResult(name=stage.name, status="completed", duration_seconds=duration)
                 results[stage.name] = res
                 log.info("Stage '%s' completed in %.2fs", stage.name, duration)
+
+            except (asyncio.CancelledError, KeyboardInterrupt) as exc:
+                duration = round(time.perf_counter() - start_time, 2)
+                ctx.store.set_stage(stage.name, status="interrupted", duration=duration, error="Interrupted by user or task cancellation")
+                res = StageResult(
+                    name=stage.name,
+                    status="interrupted",
+                    duration_seconds=duration,
+                    error_message="Interrupted by user or task cancellation",
+                )
+                results[stage.name] = res
+                if self.on_stage_end:
+                    self.on_stage_end(res)
+                try:
+                    ctx.store.export_flat_artifacts(ctx.config.outdir)
+                    log.info("Checkpoint: exported collected artifacts to %s", ctx.config.outdir)
+                except Exception as flush_err:
+                    log.warning("Failed to flush artifacts on interrupt: %s", flush_err)
+                await ctx.bus.close()
+                raise
 
             except Exception as exc:
                 duration = round(time.perf_counter() - start_time, 2)

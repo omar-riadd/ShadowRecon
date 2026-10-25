@@ -14,7 +14,9 @@ from typing import Any, Dict, List, Optional
 
 from shadowrecon import __version__
 from shadowrecon.config import BypassContext, Config, ConfigValidationError, default_nuclei_templates_dir, load_toml_config
+from shadowrecon.core.circuit import HostCircuitBreaker
 from shadowrecon.core.executor import AsyncExecutor, resolve_binary
+from shadowrecon.core.health import PreflightChecker
 from shadowrecon.core.proxy import DirectProxyProvider, ProxyPoolProvider, TorProxyProvider
 from shadowrecon.core.ratelimit import AdaptiveRateLimiter
 from shadowrecon.core.scope import parse_target, slugify
@@ -156,6 +158,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--export-csv", dest="export_csv", help="Directory path to export tabular CSV files")
     p.add_argument("--webhook", dest="webhook_url", help="Slack, Discord, or generic HTTP webhook URL (or set SHADOWRECON_WEBHOOK_URL)")
     p.add_argument("--webhook-events", default="complete,critical", help="Comma-separated events to send to webhook: complete, critical (default: complete,critical)")
+    p.add_argument("command", nargs="?", default="", help="Optional subcommand: 'doctor' to execute diagnostic health checks")
+    p.add_argument("--doctor", action="store_true", help="Run preflight diagnostic health check suite and exit")
+    p.add_argument("--no-circuit-breaker", action="store_true", help="Disable per-host circuit breaker")
+    p.add_argument("--circuit-threshold", type=int, default=5, help="Consecutive failure threshold before tripping circuit (default: 5)")
+    p.add_argument("--circuit-recovery", type=float, default=30.0, help="Circuit recovery cool-down window in seconds (default: 30.0)")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
     p.add_argument("-y", "--yes", action="store_true", help="Assume yes on interactive prompts")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -167,6 +174,13 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     setup_logging(args.verbose)
+
+    # 0. Check if doctor mode requested
+    if args.doctor or args.command == "doctor":
+        checker = PreflightChecker()
+        report = checker.run_all_checks()
+        print(report.format_table())
+        return 1 if report.has_critical_failures else 0
 
     # 1. Load config file if specified or default present
     cfg_file = Path(args.config) if args.config else None
@@ -264,6 +278,16 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         export_pdf=export_pdf_path,
         webhook_url=webhook_url,
         webhook_events=webhook_events,
+        circuit_breaker=not args.no_circuit_breaker and toml_cfg.get("circuit_breaker", True),
+        circuit_threshold=args.circuit_threshold or toml_cfg.get("circuit_threshold", 5),
+        circuit_recovery=args.circuit_recovery or toml_cfg.get("circuit_recovery", 30.0),
+    )
+
+    # Initialize Circuit Breaker
+    cb = HostCircuitBreaker(
+        failure_threshold=cfg.circuit_threshold,
+        recovery_timeout=cfg.circuit_recovery,
+        enabled=cfg.circuit_breaker,
     )
 
     # Initialize Proxy Provider
@@ -292,6 +316,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     log.info("Target: %s (domain: %s)", cfg.target, cfg.domain)
     log.info("Output directory: %s", cfg.outdir)
     log.info("Proxy Provider: %s (active: %s)", proxy_provider.provider_name, proxy_provider.get_proxy_url() or "none")
+    log.info("Host Circuit Breaker: %s (threshold: %d, recovery: %.1fs)", "Enabled" if cfg.circuit_breaker else "Disabled", cfg.circuit_threshold, cfg.circuit_recovery)
 
     # Tor Control Password check (P3.4)
     if not cfg.dry_run and cfg.use_proxy and cfg.proxy_provider == "tor" and not cfg.tor_control_password:
@@ -352,6 +377,7 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         bypass_context=bypass_ctx,
         rate_limiter=rate_limiter,
         proxy_provider=proxy_provider,
+        circuit_breaker=cb,
         drivers=global_registry,
     )
 
@@ -498,6 +524,11 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         print(f" PDF Export        : {cfg.export_pdf}")
     if cfg.webhook_url:
         print(f" Webhook URL       : {cfg.webhook_url} ({','.join(cfg.webhook_events)})")
+    if cfg.circuit_breaker:
+        cb_stats = cb.get_stats()
+        print(f" Circuit Breaker   : Enabled ({cb_stats['healthy_hosts']} healthy, {cb_stats['tripped_hosts']} tripped)")
+        if cb_stats["tripped_list"]:
+            print(f" Tripped Hosts     : {', '.join(cb_stats['tripped_list'])}")
     print("=" * 50 + "\n")
 
     # Print Drift Report to console if generated

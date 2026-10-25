@@ -71,8 +71,11 @@ async def run_lfi_stage(ctx: StageContext) -> None:
         return
 
     params = ctx.store.get_urls()
+    if ctx.circuit_breaker:
+        params = ctx.circuit_breaker.filter_healthy_urls(params)
+
     if not params:
-        log.info("No parameterized URLs available for LFI fuzzing. Skipping.")
+        log.info("No parameterized URLs available on healthy hosts for LFI fuzzing. Skipping.")
         return
 
     out_dir = ctx.config.outdir / "ffuf_lfi_ssrf"
