@@ -35,7 +35,12 @@ from shadowrecon.modules.vuln import (
 from shadowrecon.modules.waf import run_waf_stage
 from shadowrecon.pipeline.queue import AsyncEventBus
 from shadowrecon.pipeline.runner import PipelineRunner, StageContext, StageResult
-from shadowrecon.reporting.html import generate_report_from_store
+from shadowrecon.reporting import (
+    export_csv,
+    export_json,
+    export_sarif,
+    generate_report_from_store,
+)
 from shadowrecon.storage.diff import SessionDiff, diff_sessions
 from shadowrecon.storage.session import SessionStore
 
@@ -134,6 +139,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--proxy-pool", dest="proxy_pool_file", help="Path to file containing rotating proxy URLs")
     p.add_argument("--no-proxy", action="store_true", help="Disable SOCKS proxy routing")
     p.add_argument("--no-report", action="store_true", help="Skip HTML report generation")
+    p.add_argument("--export-sarif", dest="export_sarif", help="Path to export findings in OASIS SARIF v2.1.0 format")
+    p.add_argument("--export-json", dest="export_json", help="Path to export complete session manifest in JSON format")
+    p.add_argument("--export-csv", dest="export_csv", help="Directory path to export tabular CSV files")
     p.add_argument("--authorized", action="store_true", help="Acknowledge you have permission to test target")
     p.add_argument("-y", "--yes", action="store_true", help="Assume yes on interactive prompts")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
@@ -349,18 +357,30 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
             except Exception as exc:
                 log.error("Failed to calculate differential drift: %s", exc)
 
+    report_meta = {
+        "Target": cfg.target,
+        "Domain": cfg.domain,
+        "Version": f"v{__version__}",
+        "Scan Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "Tor Proxy": cfg.tor_socks if cfg.use_proxy else "Disabled",
+        "Output Directory": str(cfg.outdir),
+    }
+
     # Generate HTML Report
     if cfg.make_report:
-        report_meta = {
-            "Target": cfg.target,
-            "Domain": cfg.domain,
-            "Version": f"v{__version__}",
-            "Scan Date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "Tor Proxy": cfg.tor_socks if cfg.use_proxy else "Disabled",
-            "Output Directory": str(cfg.outdir),
-        }
         report_path = generate_report_from_store(store, cfg.outdir, report_meta, drift=diff_result)
         log.info("HTML Report generated -> %s", report_path)
+
+    # Enterprise Exports (SARIF, JSON, CSV)
+    if args.export_sarif:
+        sarif_out = export_sarif(store, Path(args.export_sarif))
+        log.info("SARIF report exported -> %s", sarif_out)
+    if args.export_json:
+        json_out = export_json(store, Path(args.export_json), meta=report_meta)
+        log.info("JSON manifest exported -> %s", json_out)
+    if args.export_csv:
+        csv_files = export_csv(store, Path(args.export_csv))
+        log.info("CSV tables exported -> %s (%d files)", Path(args.export_csv), len(csv_files))
 
     # Print Summary Table
     counts = store.get_summary_counts()
@@ -374,6 +394,12 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
     print(f" Artifacts Directory: {cfg.outdir}")
     if diff_result:
         print(f" Drift Summary     : {cfg.outdir / 'drift_summary.json'}")
+    if args.export_sarif:
+        print(f" SARIF Export      : {args.export_sarif}")
+    if args.export_json:
+        print(f" JSON Export       : {args.export_json}")
+    if args.export_csv:
+        print(f" CSV Export Dir    : {args.export_csv}")
     print("=" * 50 + "\n")
 
     # Print Drift Report to console if generated
