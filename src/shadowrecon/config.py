@@ -79,7 +79,7 @@ class Config:
     wordlist: Path
     outdir: Path
     lfi_payloads: Optional[Path] = None
-    tor_socks: str = "socks5://127.0.0.1:9050"
+    tor_socks: str = "socks5h://127.0.0.1:9050"
     tor_control_port: int = 9051
     tor_control_password: str = ""
     rotate_wait: int = 10
@@ -121,6 +121,8 @@ class Config:
     def __post_init__(self) -> None:
         if self.safe_mode:
             self.concurrency = 1
+        if self.tor_socks and self.tor_socks.startswith("socks5://"):
+            self.tor_socks = "socks5h://" + self.tor_socks[len("socks5://"):]
 
     @property
     def proxies(self) -> dict:

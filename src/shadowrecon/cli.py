@@ -131,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stages", default="all", help="Comma-separated stages to run (default: all)")
     p.add_argument("--skip-stages", default="", help="Comma-separated stages to skip")
     p.add_argument("--force-rerun", action="store_true", help="Rerun stages even if completed in session")
-    p.add_argument("--socks", default="socks5://127.0.0.1:9050", help="Tor SOCKS5 proxy URL")
+    p.add_argument("--socks", default="socks5h://127.0.0.1:9050", help="Tor SOCKS5 proxy URL (defaults to socks5h:// for remote DNS)")
     p.add_argument("--tor-port", type=int, default=9051, help="Tor control port")
     p.add_argument("--tor-pass", default=os.getenv("TOR_CONTROL_PASSWORD", ""), help="Tor control password")
     p.add_argument("--rotate-wait", type=int, default=10, help="Wait time (seconds) after circuit rotation")

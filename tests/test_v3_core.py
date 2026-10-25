@@ -71,6 +71,10 @@ class TestV3Executor(unittest.TestCase):
             ["ffuf", "-x", proxy, "-w", "dict.txt"],
         )
         self.assertEqual(
+            inject_native_proxy(["ffuf", "-w", "dict.txt"], "socks5h://127.0.0.1:9050"),
+            ["ffuf", "-x", "socks5://127.0.0.1:9050", "-w", "dict.txt"],
+        )
+        self.assertEqual(
             inject_native_proxy(["httpx-toolkit", "-silent"], proxy),
             ["httpx-toolkit", "-http-proxy", proxy, "-silent"],
         )
@@ -84,7 +88,7 @@ class TestV3Executor(unittest.TestCase):
         )
         self.assertEqual(
             inject_native_proxy(["nuclei", "-t", "cves"], proxy),
-            ["nuclei", "-proxy-socks-url", proxy, "-t", "cves"],
+            ["nuclei", "-proxy", proxy, "-t", "cves"],
         )
         self.assertEqual(
             inject_native_proxy(["dalfox", "file", "urls.txt"], proxy),
@@ -150,6 +154,16 @@ class TestV3Config(unittest.TestCase):
             loaded = load_toml_config(cfg_file)
             self.assertEqual(loaded.get("rate_limit"), 1.5)
             self.assertEqual(loaded.get("ffuf_threads"), 8)
+
+    def test_tor_socks5h_normalization(self):
+        cfg = Config(
+            target="https://example.com/",
+            domain="example.com",
+            wordlist=Path("/dev/null"),
+            outdir=Path("/tmp"),
+            tor_socks="socks5://127.0.0.1:9050",
+        )
+        self.assertEqual(cfg.tor_socks, "socks5h://127.0.0.1:9050")
 
 
 if __name__ == "__main__":

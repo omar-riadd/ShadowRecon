@@ -68,10 +68,11 @@ def inject_native_proxy(cmd: Sequence[str], socks_url: str) -> List[str]:
             return [full_cmd[0], "-p", socks_url, *full_cmd[1:]]
     elif tool in ("ffuf", "curl"):
         if "-x" not in full_cmd:
-            return [full_cmd[0], "-x", socks_url, *full_cmd[1:]]
+            ffuf_proxy = socks_url.replace("socks5h://", "socks5://") if socks_url.startswith("socks5h://") else socks_url
+            return [full_cmd[0], "-x", ffuf_proxy, *full_cmd[1:]]
     elif tool == "nuclei":
-        if "-proxy-socks-url" not in full_cmd:
-            return [full_cmd[0], "-proxy-socks-url", socks_url, *full_cmd[1:]]
+        if "-proxy" not in full_cmd and "-p" not in full_cmd and "-proxy-socks-url" not in full_cmd:
+            return [full_cmd[0], "-proxy", socks_url, *full_cmd[1:]]
     elif tool in ("dalfox", "paramspider", "katana", "gau"):
         if "--proxy" not in full_cmd and "-proxy" not in full_cmd:
             return [full_cmd[0], "--proxy", socks_url, *full_cmd[1:]]
@@ -87,7 +88,7 @@ class AsyncExecutor:
 
     def __init__(
         self,
-        socks_proxy: str = "socks5://127.0.0.1:9050",
+        socks_proxy: str = "socks5h://127.0.0.1:9050",
         use_proxy: bool = True,
         dry_run: bool = False,
         proxy_provider: Optional[Any] = None,

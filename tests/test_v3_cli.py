@@ -21,7 +21,7 @@ class TestV3Cli(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args.target, "https://example.com/")
         self.assertEqual(args.stages, "waf,subdomains")
         self.assertEqual(args.threads, 3)
-        self.assertEqual(args.socks, "socks5://127.0.0.1:9050")
+        self.assertEqual(args.socks, "socks5h://127.0.0.1:9050")
 
     async def test_dry_run_pipeline_execution(self):
         with tempfile.TemporaryDirectory() as tmpdir:
