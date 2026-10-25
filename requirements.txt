@@ -1,4 +1,7 @@
-argparse
-requests
-requests[socks]
-stem
+# Python deps for ShadowRecon. External CLI tools (subfinder, httpx, nuclei,
+# ffuf, dalfox, sqlmap, wafw00f, waybackpy, paramspider, tor, proxychains)
+# are installed separately — see ANALYSIS.md / check_tools().
+#
+# argparse was removed: it is part of the Python 3 standard library.
+requests[socks]>=2.32    # 2.32+ resolves a modern urllib3/certifi (older pins carry advisories)
+stem>=1.8

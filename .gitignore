@@ -1,0 +1,21 @@
+# Run artifacts & reports
+runs/
+demo_report/
+*.html
+200-ok.txt
+*_raw.txt
+
+# Local scratch
+words.txt
+*.log
+ship/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.venv/
+venv/

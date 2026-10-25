@@ -1,71 +1,134 @@
-# ShadowRecon
-## About
-This script is an automated reconnaissance and vulnerability scanning pipeline designed for ethical security testing of web applications. Its core features include:
+<div align="center">
 
-1. Anonymity & Evasion: All network requests and external tool executions are routed through Tor and ProxyChains to evade IP-based blocking and maintain anonymity.
-2. IP Rotation: Automatically rotates the Tor exit IP upon encountering HTTP 403 (Forbidden) or 429 (Too Many Requests) status codes, or connection errors.
-3. WAF Bypass Logic: Detects the target's WAF (Web Application Firewall) using wafw00f and runs targeted bypass payloads (e.g., Cloudflare, ModSecurity, Sucuri) before beginning the main scan.
-4. Comprehensive Recon: Performs subdomain enumeration, live host probing, Wayback Machine scraping, and deep directory/parameter fuzzing.
-5. Vulnerability Scanning: Pipelines parameterized URLs into popular tools like Dalfox, SQLMap, and FFuF for XSS, SQLi, and LFI/SSRF detection
-## Prerequisites
-This script requires several system packages and Go-based tools to be installed on your operating system (preferably Kali, Parrot, or a Debian/Ubuntu environment).
-1. System Packages:
-  The script's built-in check_tools function will guide you, but here are the primary system tools:
-  - Python 3.x and pip install requests stem
-  - Tor
-  - ProxyChains
-  - wafw00f
-  - sqlmap
-  - ffuf
-  - waybackpy
-  - dirsearch (or git clone it manually)
-2. Go-Based Tools:
-  Ensure you have Go installed and your GOBIN is in your $PATH.
-  ```
-  # Install Go tools
-  go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
-  go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-  go install -v github.com/projectdiscovery/nuclei/cmd/nuclei@latest
-  go install github.com/hahwul/dalfox/v2@latest
-  # Optional: kxss
-  go install github.com/tomnomnom/hacks/kxss@latest
-  ```
-## Configuration Setup (CRITICAL)
-The script relies heavily on Tor running and ProxyChains routing traffic correctly.
-1. Tor Setup:
-  You must configure Tor to enable the Control Port for automatic IP rotation.
+# 🕶️ ShadowRecon
 
-  1. Edit your Tor configuration file, typically /etc/tor/torrc.
-  2. Add or uncomment the following lines:
-       ```
-       ControlPort 9051
-       # IMPORTANT: Generate HashedControlPassword using 'tor --hash-password <your_password>'
-       # Replace the example below with your actual hashed password
-       HashedControlPassword 16:A6A92D73CFB42A...
-       ```
-   3. Crucially, set the plaintext password in the Python script: In the Python file, replace the placeholder password with the plaintext password you used to generate the hash
-      ```
-          # === In the Python script: ===
-          TOR_CONTROL_PORT = 9051
-          TOR_CONTROL_PASSWORD = "m06ahmed"  # <--- CHANGE THIS TO YOUR PLAINTEXT PASSWORD!
-      ```
-   4. Restart the Tor service
-2. ProxyChains Setup
-   This ensures all external tools use the local Tor SOCKS proxy
-   1. Edit your ProxyChains configuration file, typically /etc/proxychains.conf.
-   2. Ensure the last line specifies the Tor SOCKS proxy on port 9050:
-        ```
-        # ... (other config lines)
-        # proxy list
-        # add proxy here ...
-        socks5  127.0.0.1 9050
-        ```
-## Usage
-Running the Script:
-You need to provide a target URL and a wordlist for directory brute-forcing
-`python3 main.py -u <TARGET_URL> -w <WORDLIST_PATH>`
-Flag -u with the full name -url is the Target URL (required). The root URL of the website to test for example like this one https://target.com/
-Flag -w with the full name --wordlist is the Wordlist (required). Used for directory and file fuzzing (FFuF, Dirsearch) for example like this one ~/wordlists/medium.txt
-Flag --lfi-payloads is the Optional list of payloads for LFI/SSRF fuzzing with FFuF for example like this one ~/wordlists/lfi-ssrf.txt
-## Example
-`python3 main.py -u https://my-personal-site.com -w /usr/share/wordlists/dirb/common.txt --lfi-payloads ~/payloads/lfi-payloads.txt`
+**Automated, Tor-anonymized reconnaissance & vulnerability pipeline for _authorized_ web-application testing.**
+
+![python](https://img.shields.io/badge/python-3.9%2B-blue)
+![status](https://img.shields.io/badge/status-refactored%20v2.0-success)
+![license](https://img.shields.io/badge/use-authorized%20only-red)
+![platform](https://img.shields.io/badge/platform-Linux%20(Kali%2FParrot%2FDebian)-informational)
+
+</div>
+
+> ⚠️ **Legal / ethical use only.** ShadowRecon performs active scanning and
+> injection testing. Run it **only** against systems you own or are explicitly
+> authorized to test. You are responsible for staying in scope and within the
+> law. The tool enforces an authorization gate and a scope allowlist, but those
+> are safeguards — not permission.
+
+---
+
+## ✨ Highlights
+
+| | |
+|---|---|
+| 🔀 **Tor + ProxyChains** | Every request and tool run is routed through Tor; exit IP auto-rotates on `403`/`429`. |
+| 🧱 **WAF-aware** | Fingerprints the WAF with `wafw00f` and runs a matching, preserved bypass payload set. |
+| 🛰️ **Full recon** | Subdomains → live hosts → Wayback history → directory & parameter fuzzing. |
+| 🎯 **Vuln scanning** | Pipelines parameterized URLs into Dalfox (XSS), SQLMap (SQLi) and FFUF (LFI/SSRF). |
+| 🛡️ **Guardrails** | Authorization gate, scope allowlist, `--dry-run`, rate limiting, full audit log. |
+| 📊 **Beautiful report** | One self-contained, offline **HTML report** aggregating every result. |
+| 🎨 **Polished CLI** | Banner + colored logs + summary table (via `rich`, with a clean ANSI fallback). |
+
+## 🗺️ Pipeline
+
+```mermaid
+flowchart TD
+    A[Target URL] --> G{Authorization gate}
+    G -->|authorized| W[WAF detect + bypass payloads]
+    W --> S[subfinder: subdomains]
+    S --> H[httpx: live hosts]
+    H --> WB[waybackpy: historical URLs]
+    H --> F[ffuf: directory fuzz]
+    H --> N[nuclei: takeover templates]
+    WB --> P[params.txt]
+    H --> PS[paramspider] --> P
+    P --> X[dalfox: XSS]
+    P --> Q[sqlmap: SQLi]
+    P --> L[ffuf: LFI/SSRF]
+    X & Q & L & F & N --> R[📊 HTML report]
+```
+
+## 📦 Project layout
+
+```
+main.py            # orchestrator, CLI, Tor/HTTP, safe subprocess, stages
+waf_payloads.py    # WAF-bypass payload registry (data; preserved verbatim)
+utils.py           # pure, dependency-free helpers (unit-tested)
+report.py          # self-contained HTML report generator
+console.py         # banner / logging / summary table (rich optional)
+tests/             # unittest suite (also runs under pytest)
+requirements.txt   # requests[socks], stem
+ANALYSIS.md        # gap/vuln analysis + rationale for every change
+```
+
+## 🚀 Install
+
+```bash
+# Python deps
+pip install -r requirements.txt   # optional extras: pip install rich
+
+# External tools (Kali/Parrot/Debian)
+sudo apt install tor proxychains4 ffuf sqlmap wafw00f
+pipx install waybackpy paramspider
+go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+go install github.com/hahwul/dalfox/v2@latest
+```
+
+Configure Tor's control port (`/etc/tor/torrc`):
+
+```
+ControlPort 9051
+HashedControlPassword 16:...   # from: tor --hash-password <pass>
+```
+
+Then export the **plaintext** control password (never hardcode it):
+
+```bash
+export TOR_CONTROL_PASSWORD='your-plaintext-pass'
+```
+
+And point ProxyChains at Tor (`/etc/proxychains.conf`): `socks5 127.0.0.1 9050`.
+
+## 🧪 Usage
+
+```bash
+# Review the entire plan without touching the target:
+python3 main.py -u https://your-site.com/ -w wordlist.txt --dry-run
+
+# Run for real (requires explicit authorization):
+python3 main.py -u https://your-site.com/ -w wordlist.txt --authorized
+
+# With LFI/SSRF fuzzing and a request throttle:
+python3 main.py -u https://your-site.com/ -w words.txt \
+    --lfi-payloads lfi.txt --rate-limit 0.5 --authorized
+```
+
+Artifacts land in `runs/<domain>-<timestamp>/`, including `audit.log` and a
+`report.html` you can open in any browser.
+
+| Flag | Purpose |
+|---|---|
+| `--authorized` | Assert you may scan the target (required for live runs). |
+| `--dry-run` | Print every planned action; execute nothing. |
+| `--rate-limit S` | Wait `S` seconds between HTTP requests. |
+| `--no-proxychains` | Don't wrap external tools in proxychains. |
+| `--no-report` | Skip HTML report generation. |
+| `--yes` | Skip the interactive scope confirmation (automation). |
+
+## 🔒 What this refactor did **not** change
+
+Capability was deliberately left untouched: no new attack vectors, no expanded
+or sharpened WAF-bypass payloads, no evasion improvements, and scan
+aggressiveness stays at the original conservative levels. The work was
+engineering quality, operator safety, and presentation only. See
+[`ANALYSIS.md`](ANALYSIS.md).
+
+## ✅ Tests
+
+```bash
+python -m unittest discover -s tests -v    # or: pytest -q
+```

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shadowrecon"
+version = "2.0.0"
+description = "Tor-anonymized reconnaissance & vulnerability pipeline for authorized web-app testing"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "Proprietary / authorized-use-only" }
+authors = [{ name = "lumidren" }]
+keywords = ["recon", "security", "pentest", "tor", "waf"]
+dependencies = [
+    "requests[socks]>=2.32",
+    "stem>=1.8",
+]
+
+[project.optional-dependencies]
+pretty = ["rich>=13.0"]
+dev = ["pytest>=7.0", "bandit>=1.7", "pip-audit>=2.7"]
+
+[project.scripts]
+shadowrecon = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "utils", "report", "console", "waf_payloads"]
+
+[tool.bandit]
+# B404/B603 are expected: this tool invokes external recon binaries by design,
+# always with shell=False and validated inputs. See the inline nosec notes.
+skips = ["B404"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
