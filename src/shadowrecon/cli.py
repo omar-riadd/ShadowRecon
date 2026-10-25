@@ -377,14 +377,11 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
 
     # Enterprise Exports (SARIF, JSON, CSV)
     if args.export_sarif:
-        sarif_out = export_sarif(store, Path(args.export_sarif))
-        log.info("SARIF report exported -> %s", sarif_out)
+        export_sarif(store, Path(args.export_sarif))
     if args.export_json:
-        json_out = export_json(store, Path(args.export_json), meta=report_meta)
-        log.info("JSON manifest exported -> %s", json_out)
+        export_json(store, Path(args.export_json), meta=report_meta)
     if args.export_csv:
-        csv_files = export_csv(store, Path(args.export_csv))
-        log.info("CSV tables exported -> %s (%d files)", Path(args.export_csv), len(csv_files))
+        export_csv(store, Path(args.export_csv))
 
     # Print Summary Table
     counts = store.get_summary_counts()
