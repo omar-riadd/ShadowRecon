@@ -22,7 +22,6 @@ scan_out/
 *.html
 *.sarif
 *.pdf
-!ShadowRecon Project Presentation.pdf
 200-ok.txt
 *_raw.txt
 subdomains.txt
