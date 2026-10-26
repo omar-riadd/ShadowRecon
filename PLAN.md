@@ -73,14 +73,14 @@ flowchart TD
 > **Objective:** Eliminate all local DNS resolution leak vectors when routing through Tor.
 
 * **Step 1.1: Normalize Tor Proxy URL to `socks5h://`**
-  * File: [`src/shadowrecon/config.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/config.py)
+  * File: [`src/shadowrecon/config.py`](src/shadowrecon/config.py)
   * Action:
     * In `Config` dataclass and CLI defaults, change default `tor_socks` from `socks5://127.0.0.1:9050` to `socks5h://127.0.0.1:9050`.
     * In `Config.__post_init__()`, if `use_proxy` and `tor_socks` begins with `socks5://`, automatically normalize to `socks5h://`.
   * Rationale: Standard `socks5://` instructs networking libraries to resolve DNS locally and only send TCP connects through SOCKS. `socks5h://` forces remote DNS resolution through the Tor exit node.
 
 * **Step 1.2: Tool Proxy Argument Adaptation**
-  * File: [`src/shadowrecon/core/executor.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/executor.py)
+  * File: [`src/shadowrecon/core/executor.py`](src/shadowrecon/core/executor.py)
   * Action:
     * In `inject_native_proxy()`: ensure tools that require specific SOCKS syntax receive correct protocol schemes:
       * `httpx`: Supports `socks5://` or HTTP proxy. If using Tor SOCKS, pass `-http-proxy` with `socks5://` (httpx supports socks5 URI).
@@ -101,7 +101,7 @@ flowchart TD
 > **Objective:** Remove ~600 lines of obsolete, confusing v2 code from `main.py` while preserving 100% CLI compatibility.
 
 * **Step 2.1: Slim Root `main.py`**
-  * File: [`main.py`](file:///home/omar/Projects/ShadowRecon/main.py)
+  * File: [`main.py`](main.py)
   * Action:
     * Replace entire file with clean bootstrap:
       ```python
@@ -134,7 +134,7 @@ flowchart TD
 > **Objective:** Prevent duplicate findings across multiple scanner drivers or repeated sessions.
 
 * **Step 3.1: Add Finding Fingerprint and Schema Migration**
-  * File: [`src/shadowrecon/storage/session.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/storage/session.py)
+  * File: [`src/shadowrecon/storage/session.py`](src/shadowrecon/storage/session.py)
   * Action:
     * In `_init_schema()`, update `findings` table:
       ```sql
@@ -165,7 +165,7 @@ flowchart TD
 > **Objective:** Eliminate single-worker bottlenecks in Dalfox, FFUF, and SQLMap while respecting safe-mode bounds.
 
 * **Step 4.1: Dynamic Dalfox Worker Scaling**
-  * File: [`src/shadowrecon/drivers/tools.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/drivers/tools.py)
+  * File: [`src/shadowrecon/drivers/tools.py`](src/shadowrecon/drivers/tools.py)
   * Action:
     * In `DalfoxDriver.execute()`: Replace hardcoded `"--worker", "1"` with:
       ```python
@@ -174,7 +174,7 @@ flowchart TD
       ```
 
 * **Step 4.2: Concurrent Multi-Host FFUF Execution**
-  * File: [`src/shadowrecon/modules/recon.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/recon.py)
+  * File: [`src/shadowrecon/modules/recon.py`](src/shadowrecon/modules/recon.py)
   * Action:
     * In `run_fuzzing_stage()`: Replace sequential `for host in hosts:` with bounded concurrent worker tasks:
       ```python
@@ -186,7 +186,7 @@ flowchart TD
       ```
 
 * **Step 4.3: SQLMap Batch Chunking & Timeouts**
-  * File: [`src/shadowrecon/drivers/tools.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/drivers/tools.py)
+  * File: [`src/shadowrecon/drivers/tools.py`](src/shadowrecon/drivers/tools.py)
   * Action:
     * In `SqlmapDriver.execute()`: Limit target batch size to top 50 unique parameter templates.
     * Inject `--timeout=15` and `--retries=1` to prevent hanging on unresponsive hosts.
@@ -202,7 +202,7 @@ flowchart TD
 > **Objective:** Replace naive header spoofing with real-world query encoding transforms, AST mutations, and SQLMap tamper scripts.
 
 * **Step 5.1: Payload Encoding & Mutation Transforms**
-  * File: [`src/shadowrecon/waf_payloads.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/waf_payloads.py)
+  * File: [`src/shadowrecon/waf_payloads.py`](src/shadowrecon/waf_payloads.py)
   * Action:
     * Implement encoding utility functions:
       - `url_double_encode(payload)`: `%2527` instead of `%27`
@@ -216,7 +216,7 @@ flowchart TD
       - Imperva: `charencode,space2plus`
 
 * **Step 5.2: Propagate Tamper Arguments to SQLMap & Dalfox**
-  * File: [`src/shadowrecon/config.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/config.py) & [`src/shadowrecon/drivers/tools.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/drivers/tools.py)
+  * File: [`src/shadowrecon/config.py`](src/shadowrecon/config.py) & [`src/shadowrecon/drivers/tools.py`](src/shadowrecon/drivers/tools.py)
   * Action:
     * In `BypassContext`: Add `tamper_scripts: List[str] = field(default_factory=list)`.
     * In `BypassContext.sqlmap_args()`: If `tamper_scripts`, append `--tamper=<comma_separated>`.
@@ -233,7 +233,7 @@ flowchart TD
 > **Objective:** Enable true pipeline streaming so downstream crawlers and vulnerability scanners process live hosts as soon as they are discovered.
 
 * **Step 6.1: Queue Draining & Progressive Stage Handlers**
-  * File: [`src/shadowrecon/modules/recon.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/recon.py) & [`src/shadowrecon/pipeline/runner.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/pipeline/runner.py)
+  * File: [`src/shadowrecon/modules/recon.py`](src/shadowrecon/modules/recon.py) & [`src/shadowrecon/pipeline/runner.py`](src/shadowrecon/pipeline/runner.py)
   * Action:
     * In `run_probing_stage()`: Stream live hosts onto `bus.publish("host_live", host)` in real-time.
     * In `run_urls_stage()`: Implement an asynchronous background worker listening to `bus.stream("host_live")`. Start crawling/harvesting endpoints for newly discovered hosts without waiting for all subdomains to complete probing.

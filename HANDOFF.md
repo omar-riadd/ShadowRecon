@@ -1,7 +1,7 @@
 # ShadowRecon Session Handoff (v3.4.0)
 
 > Generated on: 2026-10-26T03:06:00+03:00  
-> Working Directory: `/home/omar/Projects/ShadowRecon`  
+> Working Directory: `ShadowRecon` repository root  
 > Git Branch: `main`  
 > Test Suite: **197 tests passing (2.01s)**  
 > Engineering Rating: **9.7 / 10 (Enterprise Hardening Complete)**

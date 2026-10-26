@@ -1,24 +1,70 @@
-# Run artifacts & reports
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*.key
+*.cert
+*.crt
+
+# Run artifacts & session databases
 runs/
 run_*/
 results/
 demo_report/
+out/
+scan_out/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
 
+# Flat output artifacts
 *.html
+*.sarif
+*.pdf
+!ShadowRecon Project Presentation.pdf
 200-ok.txt
 *_raw.txt
+subdomains.txt
+live.txt
+params.txt
+wayback.txt
+xss_dalfox.txt
+nuclei_findings.jsonl
+nuclei_takeover.txt
+drift_summary.json
+drift_summary.txt
+ffuf_dirs/
+sqlmap_out/
 
-# Local scratch
+# Local scratch & snapshots
 words.txt
 *.log
+*.tmp
 ship/
+scratch/
 
-# Python
+# Python & Build
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 build/
 dist/
 .pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
 .venv/
 venv/
+ENV/
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
