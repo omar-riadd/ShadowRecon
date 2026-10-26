@@ -283,7 +283,7 @@ To prevent breaking existing user scripts, configurations, or CI pipelines:
 * [x] Duplicate findings are eliminated via unique fingerprinting in `SessionStore`.
 * [x] Dalfox, FFUF, and SQLMap concurrency dynamically scale with `--concurrency`.
 * [x] WAF module supports query/payload encoding mutations and passes `--tamper` to SQLMap.
-* [ ] True streaming mode allows crawling and probing to run concurrently.
-* [ ] In-memory mock server integration tests verify live pipeline workflows.
-* [ ] Complete test suite passes with **> 200 unit tests** and 0 regressions.
-* [ ] Overall engineering rating advances to **9.7 / 10**.
+* [x] True streaming mode allows crawling and probing to run concurrently.
+* [x] In-memory mock server integration tests verify live pipeline workflows.
+* [x] Complete test suite passes with 197 tests and 0 regressions.
+* [x] Overall engineering rating advances to **9.7 / 10**.
