@@ -42,6 +42,11 @@ words.txt
 *.tmp
 ship/
 scratch/
+notes/
+HANDOFF.md
+PLAN.md
+IMPROVEMENT_PLAN.md
+_stage/
 
 # Python & Build
 __pycache__/
