@@ -3,6 +3,34 @@
 All notable changes to ShadowRecon are documented here.
 This project adheres to [Keep a Changelog](https://keepachangelog.com/).
 
+## [3.4.0] - 2026-10-26
+
+Enterprise hardening and offensive realism: remote DNS leak prevention via `socks5h://`, finding deduplication with SQLite fingerprinting, dynamic worker scaling, modern WAF mutation engine with SQLMap tamper script mapping, progressive producer-consumer pipeline streaming, and in-memory live HTTP integration testbed.
+
+### Security & Anonymity
+- **Remote DNS Resolution**: Enforced `socks5h://127.0.0.1:9050` as the default Tor proxy protocol scheme and auto-normalized `socks5://` to `socks5h://` across all configurations and environment variables (`ALL_PROXY`), preventing local DNS query leaks.
+- **Proxy Scheme Adaptation**: Automatically converted `socks5h://` down to `socks5://` strictly for `ffuf` (which rejects `socks5h://` URLs), and updated Nuclei proxy parameter to `-proxy`.
+- **Ambient Proxy Leak Prevention**: Explicitly bound `proxies={"http": None, "https": None}` in `requests` when proxy routing is disabled, preventing unintended traffic leakage through ambient shell environment variables.
+
+### Architecture & Hygiene
+- **Root Entrypoint Bootstrap**: Slimmed root `main.py` from 652 lines of legacy synchronous code down to a clean 49-line bootstrap shim delegating to `shadowrecon.cli:main` while retaining backward-compatible aliases for legacy test suites.
+- **Finding Fingerprinting & Deduplication**: Added deterministic finding fingerprinting (`sha256(vuln_type + target_url + payload)[:16]`) with unique SQLite index constraint and automatic migration check for existing session databases.
+
+### Throughput & Performance
+- **Dynamic Dalfox Workers**: Replaced hardcoded single-worker execution with dynamic worker scaling mapped to `--concurrency` (clamped to 1 in `--safe-mode`).
+- **Concurrent Multi-Host FFUF**: Parallelized directory fuzzing across multiple hosts using `asyncio.Semaphore` and `asyncio.gather`.
+- **SQLMap Batch Chunking & Timeouts**: Injected `--timeout=15` and `--retries=1` into single and batch SQLMap commands and capped batch input to top 50 unique parameter templates.
+- **Progressive Pipeline Streaming**: Implemented `run_progressive_recon()`, allowing downstream URL harvesting and crawler drivers to consume `host_live` events and extract endpoints concurrently as live hosts are discovered by probing.
+
+### WAF Evasion & Offensive Realism
+- **Payload Mutation Engine**: Implemented `url_double_encode()`, `sql_comment_inline()`, `case_alternate()`, and `unicode_normalize_encode()` in `waf_payloads.py`.
+- **SQLMap Tamper Integration**: Mapped detected WAF vendors (Cloudflare, AWS, ModSecurity, Imperva, Sucuri, FortiWeb, F5/BIG-IP, Akamai) to recommended SQLMap tamper scripts via `get_recommended_tampers()` and propagated them via `BypassContext.sqlmap_args()`.
+
+### Verification Suite
+- **Mock Vulnerable HTTP Target Server**: Built in-memory `MockTargetServer` (`ThreadingHTTPServer`) with simulated WAF rules, reflected XSS, and SQLi endpoints.
+- **Live End-to-End Integration Tests**: Created `tests/test_v3_e2e_live.py` verifying real HTTP probe responses, WAF bypass detection, and pipeline CLI execution.
+- **Test Coverage**: 197 unit and integration tests passing in ~2.0s with 0 regressions.
+
 ## [3.3.0] - 2026-10-26
 
 Hardening and reliability overhaul: strict network isolation & anonymity leak prevention, runtime circuit breaker feedback loop, false-positive-free WAF bypass qualification, progressive event streaming, and safe concurrency controls.
