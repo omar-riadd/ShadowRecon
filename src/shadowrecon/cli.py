@@ -59,7 +59,7 @@ BANNER = r"""
   / __/ / /  ___ _ ___/ / ___  _    __ / __ \ ___  ____ ___   ___  
  _\ \  / _ \/ _ `// _  / / _ \| |/|/ // /_/ // -_)/ __// _ \ / _ \ 
 /___/ /_//_/\_,_/ \_,_/  \___/|__,__/ \_, _/ \__/ \__/ \___//_//_/ 
-                             v3.0 Async Redesign
+                        v3.4 Enterprise Hardening
 """
 
 REQUIRED_TOOLS = {
@@ -121,7 +121,7 @@ def check_tooling(dry_run: bool = False) -> None:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="shadowrecon",
-        description="ShadowRecon v3.0 — Tor-anonymized reconnaissance and vulnerability pipeline",
+        description="ShadowRecon v3.4 — Tor-anonymized reconnaissance and vulnerability pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("-u", "--url", dest="target", help="Target URL (e.g. https://example.com/)")

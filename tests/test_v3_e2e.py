@@ -9,6 +9,7 @@ root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir / "src"))
 sys.path.insert(0, str(root_dir))
 
+from shadowrecon import __version__
 from shadowrecon.cli import async_main
 from shadowrecon.storage.session import SessionStore
 
@@ -37,7 +38,7 @@ class TestV3PipelineE2E(unittest.IsolatedAsyncioTestCase):
             store = SessionStore(db_path)
             self.assertEqual(store.get_metadata("target"), "https://app.example.com/")
             self.assertEqual(store.get_metadata("domain"), "app.example.com")
-            self.assertEqual(store.get_metadata("version"), "3.0.0")
+            self.assertEqual(store.get_metadata("version"), __version__)
 
             stages = store.get_stages()
             # Verify every standard stage is tracked
@@ -55,7 +56,7 @@ class TestV3PipelineE2E(unittest.IsolatedAsyncioTestCase):
             report_path = outdir / "report.html"
             self.assertTrue(report_path.is_file(), "report.html missing")
             report_html = report_path.read_text(encoding="utf-8")
-            self.assertIn("ShadowRecon v3.0 Report", report_html)
+            self.assertIn(f"ShadowRecon v{__version__} Report", report_html)
             self.assertIn("https://app.example.com/", report_html)
             self.assertIn("<svg", report_html)  # Embedded SVG bar chart
             self.assertIn("Pipeline Stages", report_html)

@@ -1,160 +1,191 @@
 # ShadowRecon — Architecture & Codebase Map
 
 ## Overview
-ShadowRecon is a Python 3 CLI reconnaissance and active vulnerability scanning pipeline designed for authorized security assessments.
-It routes external security tools and HTTP requests through Tor with ProxyChains, automatically requesting new Tor circuits upon receiving HTTP 403 or 429 status codes.
-The tool detects Web Application Firewalls (via `wafw00f`) and tests specific bypass mutations before orchestrating subdomain discovery, live host probing, archive extraction, directory fuzzing, and takeover testing.
-Extracted parameterized endpoints are subsequently passed into active vulnerability scanners: Dalfox for XSS, SQLMap for SQL Injection, and FFUF for LFI/SSRF.
-Execution results are recorded in a per-run audit log and aggregated into an offline, self-contained HTML report with dynamic charts.
+ShadowRecon (v3.4.0) is an enterprise-grade, asynchronous Python reconnaissance and vulnerability scanning pipeline designed for authorized security assessments.
+
+### Core Architectural Tenets:
+1. **Network Anonymization & Zero DNS Leaks**: Native `socks5h://` protocol injection across all sub-scanners and Python HTTP requests ensures both TCP streams and DNS lookups resolve strictly on remote Tor exit nodes. Pluggable proxy providers support Tor, rotating proxy pools, or direct execution.
+2. **Asynchronous Streaming & Event Bus**: Central `AsyncEventBus` coordinates decoupled producers and consumers. Stages run with per-stage fault isolation, while progressive reconnaissance streaming yields real-time discoveries without blocking.
+3. **Pluggable Scanner Driver Architecture**: Unified `ScannerDriver` interface and `DriverRegistry` decouple scanner implementations (12 external security tools) from pipeline orchestrators.
+4. **Resilient Session Persistence & Drift Analysis**: SQLite `session.db` maintains full execution history, enabling instant resumption (`--force-rerun` to override). Deterministic finding fingerprints (`sha256(rule_id:endpoint:param:hash)`) enable cross-session differential drift analysis (`shadowrecon-diff`).
+5. **Adaptive Offensive Engineering**: Automated WAF detection (`wafw00f`), active baseline probing, and mutation transforms (`url_double_encode`, `sql_comment_inline`, `case_alternate`, `unicode_normalize_encode`) dynamically feed bypass headers and vendor-specific SQLMap tamper scripts (`tamper/between.py,randomcase.py,...`) directly into active scanners.
+6. **Production Safety & Circuit Breaking**: Per-host circuit breaker (`HostCircuitBreaker`) prevents scanner cascading failures. Safe mode enforces concurrency locks, request delays, and non-destructive scan profiles.
+7. **Enterprise Multi-Format Reporting**: Self-contained dark offline HTML report with embedded SVG metrics, OASIS SARIF v2.1.0 for GitHub Security tab integration, PDF (via WeasyPrint), Markdown, JSON, CSV, and real-time webhook alerting (Slack/Discord).
+
+---
 
 ## File-by-File Table
 
-| File | Role | Talks To / Dependencies |
+| File / Directory | Role | Dependencies & Interfaces |
 |---|---|---|
-| [`main.py`](file:///home/omar/Projects/ShadowRecon/main.py) | Main orchestrator & CLI entrypoint; manages Tor circuit rotation, safe subprocess execution (`shell=False`), and stage coordination. | `console.py`, `report.py`, `waf_payloads.py`, `utils.py`, external CLI tools (`subfinder`, `httpx`, `waybackpy`, `ffuf`, `nuclei`, `paramspider`, `dalfox`, `sqlmap`, `wafw00f`, `proxychains`, `tor`). |
-| [`waf_payloads.py`](file:///home/omar/Projects/ShadowRecon/waf_payloads.py) | Explicit WAF-bypass payload registry (`BYPASS` dict) containing mutation builders for 20 known WAF vendors plus default fallbacks. | Imported by `main.py` and `tests/test_shadowrecon.py`. |
-| [`utils.py`](file:///home/omar/Projects/ShadowRecon/utils.py) | Pure standard-library helper functions (`parse_target`, `in_scope`, `slugify`, `read_lines`, `count_lines`). Zero third-party dependencies. | Used across `main.py`, `report.py`, and `tests/test_shadowrecon.py`. |
-| [`console.py`](file:///home/omar/Projects/ShadowRecon/console.py) | CLI presentation layer; displays ASCII banner, logging formatters, and terminal summary tables. Uses `rich` when available, falling back to ANSI escape sequences. | `main.py`; optional `rich` library. |
-| [`report.py`](file:///home/omar/Projects/ShadowRecon/report.py) | Offline HTML report builder; parses line-based and directory-based artifacts into structured sections, summary metrics cards, inline SVG charts, and collapsible details. | `utils.py`; produces `runs/<domain>-<timestamp>/report.html`. |
-| [`tests/test_shadowrecon.py`](file:///home/omar/Projects/ShadowRecon/tests/test_shadowrecon.py) | Unit test suite verifying URL parsing, scope validation, line handling, WAF builder signatures, and HTML report compilation. | Tested via `python -m unittest` or `pytest`. |
-| [`pyproject.toml`](file:///home/omar/Projects/ShadowRecon/pyproject.toml) | PEP 517/621 packaging metadata; specifies dependencies, scripts (`shadowrecon = main:main`), and pytest/bandit configurations. | Build tooling (`setuptools`). |
-| [`requirements.txt`](file:///home/omar/Projects/ShadowRecon/requirements.txt) | Pinned Python runtime dependencies (`requests[socks]>=2.32`, `stem>=1.8`). | Python package installer (`pip`). |
-| [`ANALYSIS.md`](file:///home/omar/Projects/ShadowRecon/ANALYSIS.md) | Historical architectural gap analysis; details security fixes (removal of command injection, credential leaks) from legacy v1 to v2. | Reference documentation. |
-| [`SECURITY.md`](file:///home/omar/Projects/ShadowRecon/SECURITY.md) | Security policy document detailing SAST findings (`bandit`), accepted `# nosec` waivers, and dependency hygiene rules. | Reference documentation. |
-| [`CHANGELOG.md`](file:///home/omar/Projects/ShadowRecon/CHANGELOG.md) | Standard changelog recording v2.0.0 refactoring details. | Reference documentation. |
-| [`words.txt`](file:///home/omar/Projects/ShadowRecon/words.txt) | Minimal sample wordlist containing 3 entries (`admin`, `login`, `api`). | Used as input for `-w` during testing. |
-| [`.github/workflows/ci.yml`](file:///home/omar/Projects/ShadowRecon/.github/workflows/ci.yml) | GitHub Actions CI matrix workflow for Python 3.9, 3.11, and 3.12. | GitHub Actions runner. |
-| [`_stage/test_v1.py`](file:///home/omar/Projects/ShadowRecon/_stage/test_v1.py) | Historical intermediate test file for `utils.py`. | Staging / archival artifact. |
-| [`_stage/test_v2.py`](file:///home/omar/Projects/ShadowRecon/_stage/test_v2.py) | Historical intermediate test file for `utils.py` and `waf_payloads.py`. | Staging / archival artifact. |
-| [`ship/ShadowRecon Project Presentation.pdf`](file:///home/omar/Projects/ShadowRecon/ship/ShadowRecon%20Project%20Presentation.pdf) | Case study presentation documenting an authenticated profile XSS discovered on a target using ShadowRecon. | Reference / showcase documentation. |
+| [`main.py`](file:///home/omar/Projects/ShadowRecon/main.py) | Lightweight CLI bootstrap shim delegating to `shadowrecon.cli`. | Imports and calls `shadowrecon.cli.main()`. |
+| [`src/shadowrecon/__init__.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/__init__.py) | Package initialization and canonical version declaration (`__version__ = "3.4.0"`). | Standard library only. |
+| [`src/shadowrecon/cli.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/cli.py) | Main asynchronous CLI entrypoint, argument parsing, banner, preflight doctor integration, session orchestration, and report dispatch. | `config.py`, `core/`, `storage/`, `pipeline/`, `modules/`, `reporting/`, `drivers/`. |
+| [`src/shadowrecon/config.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/config.py) | Dataclass-based runtime configuration (`Config`), `BypassContext` (WAF bypass headers, mutations, and tamper scripts), and TOML file loader (`shadowrecon.toml`). | Standard library (`tomllib` / `tomli`). |
+| [`src/shadowrecon/core/circuit.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/circuit.py) | Per-host circuit breaker (`HostCircuitBreaker`) tracking failure states, tripping on consecutive failures, and cooling down after recovery windows. | Standard library (`time`, `threading`). |
+| [`src/shadowrecon/core/executor.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/executor.py) | Asynchronous process executor (`AsyncExecutor`) with native proxy flag injection (`-x`, `--proxy`, `-proxy-socks-url`), `ALL_PROXY` environment variable injection, circuit breaker integration, and dry-run simulation. | `asyncio.subprocess`, `core/circuit.py`, `core/proxy.py`. |
+| [`src/shadowrecon/core/health.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/health.py) | Preflight environment checker (`PreflightChecker`, invoked via `--doctor`); validates required/optional CLI binaries, Tor SOCKS5 reachability, Tor ControlPort authentication, and directory write permissions. | `shutil`, `socket`, `stem`. |
+| [`src/shadowrecon/core/proxy.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/proxy.py) | Pluggable proxy abstraction (`ProxyProvider`, `TorProxyProvider`, `ProxyPoolProvider`, `DirectProxyProvider`). | `core/tor.py`, `requests`. |
+| [`src/shadowrecon/core/ratelimit.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/ratelimit.py) | Adaptive rate limiter (`AdaptiveRateLimiter`) implementing exponential backoff with jitter on 429/403 responses. | `asyncio`, `random`. |
+| [`src/shadowrecon/core/scope.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/scope.py) | Target URL parsing (`parse_target`), scope validation (`ScopeManager`), wildcard/CIDR exclusion matcher, line readers, and string slugifiers. | `urllib.parse`, `ipaddress`, `fnmatch`. |
+| [`src/shadowrecon/core/tor.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/core/tor.py) | Tor circuit manager (`TorManager`) communicating with Stem controller on port 9051 to signal `NEWNYM` circuit rotation upon rate limits or blocks. | `stem.control.Controller`. |
+| [`src/shadowrecon/drivers/base.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/drivers/base.py) | Abstract base class `ScannerDriver` and centralized `DriverRegistry` enabling runtime driver swapping and stage discovery. | Standard library ABC. |
+| [`src/shadowrecon/drivers/tools.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/drivers/tools.py) | Concrete scanner drivers for Subfinder, Assetfinder, Amass, HTTPX, Katana, Waybackpy, Gau, ParamSpider, Nuclei, Dalfox, SQLMap, and FFUF. | `drivers/base.py`, `core/executor.py`. |
+| [`src/shadowrecon/modules/waf.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/waf.py) | Stage 1: WAF fingerprinting (`wafw00f`), active baseline probing, mutation transform evaluation, and SQLMap tamper script mapping into `BypassContext`. | `waf_payloads.py`, `config.py`, `requests`. |
+| [`src/shadowrecon/modules/recon.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/recon.py) | Stages 2, 3, 6, 7: Subdomain enumeration, HTTP service probing with custom port matrices, URL crawling/archiving with deduplication, and directory fuzzing with multi-host concurrency. | `drivers/`, `storage/session.py`. |
+| [`src/shadowrecon/modules/nuclei.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/nuclei.py) | Stage 5: Nuclei scanning with CVSS severity filtering (`--severity`) and template tags (`--tags`). | `drivers/`, `storage/session.py`. |
+| [`src/shadowrecon/modules/takeover.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/takeover.py) | Stage 4: Subdomain takeover detection using targeted Nuclei takeover templates. | `core/executor.py`, `storage/session.py`. |
+| [`src/shadowrecon/modules/vuln.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/modules/vuln.py) | Stages 8, 9, 10: Active vulnerability scanning — Dalfox (dynamic workers), SQLMap (batch chunking, timeouts, vendor tampers), and FFUF (LFI/SSRF). | `drivers/`, `config.py`, `storage/session.py`. |
+| [`src/shadowrecon/pipeline/queue.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/pipeline/queue.py) | Pub/Sub asynchronous event bus (`AsyncEventBus`) for intra-stage communication and real-time finding notifications. | `asyncio.Queue`. |
+| [`src/shadowrecon/pipeline/runner.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/pipeline/runner.py) | Pipeline runner (`PipelineRunner`) and stage execution context (`StageContext`); enforces fault isolation, resumption check, and timings. | `storage/session.py`, `config.py`. |
+| [`src/shadowrecon/pipeline/progressive.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/pipeline/progressive.py) | Progressive reconnaissance streamer (`run_progressive_recon`); yields subdomains, live hosts, URLs, and findings in real time as async generators. | `pipeline/queue.py`, `pipeline/runner.py`. |
+| [`src/shadowrecon/storage/session.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/storage/session.py) | SQLite session database (`SessionStore`) managing stages, subdomains, hosts, URLs, WAF bypasses, and findings with deterministic SHA-256 fingerprinting. | `sqlite3`, `hashlib`. |
+| [`src/shadowrecon/storage/diff.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/storage/diff.py) | Cross-session differential drift analysis (`SessionDiff`, `diff_sessions`, standalone CLI `shadowrecon-diff`). | `storage/session.py`. |
+| [`src/shadowrecon/reporting/html.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/reporting/html.py) | Offline dark HTML report generator with embedded SVG bar charts and zero external CDN dependencies. | `storage/session.py`, `html`. |
+| [`src/shadowrecon/reporting/export.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/reporting/export.py) | Enterprise exporters: Markdown (`export_markdown`), PDF (`export_pdf` via WeasyPrint), SARIF v2.1.0 (`export_sarif`), JSON (`export_json`), and CSV (`export_csv`). | Standard library, optional `weasyprint`. |
+| [`src/shadowrecon/reporting/webhook.py`](file:///home/omar/Projects/ShadowRecon/src/shadowrecon/reporting/webhook.py) | Webhook notification dispatcher (`send_webhook`, `attach_finding_notifier`) supporting Slack, Discord, and generic HTTP JSON endpoints. | `urllib.request`. |
+| [`waf_payloads.py`](file:///home/omar/Projects/ShadowRecon/waf_payloads.py) | Data registry of WAF vendor profiles and payload mutation templates (preserved verbatim). | Python dictionary. |
+| [`pyproject.toml`](file:///home/omar/Projects/ShadowRecon/pyproject.toml) | Packaging specifications, scripts (`shadowrecon`, `shadowrecon-diff`), dependencies, and test configurations. | PEP 517/621 build tooling. |
+| [`requirements.txt`](file:///home/omar/Projects/ShadowRecon/requirements.txt) | Core runtime dependencies (`requests[socks]>=2.32`, `stem>=1.8`). | `pip`. |
 
-## Pipeline Sequence
+---
+
+## Pipeline Execution Sequence
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
-    participant Main as main.py (Orchestrator)
-    participant Tor as Tor / Stem Controller
-    participant WAF as WAF Module (wafw00f & waf_payloads)
-    participant Recon as Recon Tools (subfinder, httpx, waybackpy, paramspider)
-    participant Fuzz as Fuzzing & Scanning (ffuf, nuclei, dalfox, sqlmap)
-    participant Rep as report.py
+    participant CLI as CLI & Preflight (cli.py)
+    participant Bus as AsyncEventBus
+    participant Runner as PipelineRunner
+    participant WAF as WAF Module (waf.py)
+    participant Recon as Recon Drivers (subfinder, httpx, katana)
+    participant Vuln as Vuln Engines (dalfox, sqlmap, nuclei, ffuf)
+    participant Store as SessionStore (session.db)
+    participant Rep as Exporters (HTML, SARIF, PDF, Webhook)
 
-    Operator->>Main: python3 main.py -u URL -w wordlist --authorized
-    Main->>Main: Validate URL & check required binaries
-    Main->>Operator: Prompt confirmation (type domain)
-    Main->>WAF: detect_waf() via wafw00f
-    WAF-->>Main: Detected WAF name (or None)
-    Main->>WAF: Send vendor-specific bypass payloads
-    WAF->>Tor: HTTP requests via SOCKS5 proxy
-    Tor-->>Main: HTTP Responses (log 200 OK hits)
-    
+    Operator->>CLI: shadowrecon -u https://target.com/ -w words.txt --authorized
+    CLI->>CLI: PreflightChecker: verify binaries, Tor SOCKS & ControlPort
+    CLI->>Store: Initialize session.db, record target, domain, version
+    CLI->>Runner: Execute PipelineStages with StageContext
+
     rect rgb(20, 30, 45)
-        note over Main, Recon: Reconnaissance Phase
-        Main->>Recon: subfinder -> subdomains.txt
-        Main->>Recon: httpx -l subdomains.txt -> live.txt
-        Main->>Recon: waybackpy --url target -> wayback.txt
-        Main->>Recon: FFUF dir fuzzing on live hosts -> ffuf_dirs/*.csv
-        Main->>Recon: nuclei takeovers on live hosts -> nuclei_takeover.txt
-        Main->>Recon: Extract params from wayback.txt & run paramspider -> params.txt
+        note over Runner, WAF: Phase 1: WAF Detection & Mutation Testing
+        Runner->>WAF: Fingerprint via wafw00f & baseline probe
+        WAF->>WAF: Evaluate mutation transforms (encoding, comments, casing)
+        WAF->>Store: Save winning bypass headers & map SQLMap tamper scripts
+    end
+
+    rect rgb(25, 35, 20)
+        note over Runner, Recon: Phase 2: Reconnaissance & Asset Enumeration
+        Runner->>Recon: subfinder (via SOCKS5) -> subdomains
+        Recon-->>Bus: Publish discovered subdomains
+        Runner->>Recon: httpx-toolkit (multi-port probing) -> live hosts
+        Recon-->>Bus: Publish verified live hosts
+        Runner->>Recon: katana + waybackpy + paramspider -> harvested URLs
+        Recon->>Store: Deduplicate endpoints by query signature -> params.txt
+        Runner->>Recon: ffuf (multi-host concurrent dir fuzzing)
     end
 
     rect rgb(35, 20, 30)
-        note over Main, Fuzz: Active Scanning Phase
-        Main->>Fuzz: dalfox file params.txt -> xss_dalfox.txt
-        Main->>Fuzz: sqlmap -m params.txt -> sqlmap_out/
-        opt LFI payloads provided
-            Main->>Fuzz: ffuf with LFI wordlist against parameterized URLs -> ffuf_lfi_ssrf/*.csv
-        end
+        note over Runner, Vuln: Phase 3: Targeted Active Vulnerability Scanning
+        Runner->>Vuln: nuclei (takeover & CVSS templates)
+        Runner->>Vuln: dalfox (XSS with dynamic worker scaling & bypass headers)
+        Runner->>Vuln: sqlmap (SQLi with batch chunking, timeouts & vendor tampers)
+        Runner->>Vuln: ffuf (LFI/SSRF against parameterized endpoints)
+        Vuln->>Store: Record findings with SHA-256 deterministic fingerprints
+        Vuln-->>Bus: Emit finding event -> Real-time Webhook alert (Slack/Discord)
     end
 
-    Main->>Rep: collect(outdir) & generate(meta)
-    Rep-->>Main: Written report.html
-    Main->>Operator: Summary table & run directory path
+    rect rgb(30, 30, 40)
+        note over CLI, Rep: Phase 4: Persistence, Drift & Multi-Format Reporting
+        Runner-->>CLI: Pipeline execution complete
+        CLI->>Store: Export flat artifacts (subdomains.txt, live.txt, params.txt)
+        opt Differential Drift Analysis (--diff)
+            CLI->>Store: diff_sessions(store, prior_session.db) -> drift_summary.json
+        end
+        CLI->>Rep: Generate Offline HTML report (embedded SVG charts)
+        CLI->>Rep: Export SARIF v2.1.0, PDF, Markdown, JSON, CSV
+        CLI->>Rep: Send completion summary webhook
+        CLI->>Operator: Terminal summary table & output directory
+    end
 ```
 
-## Data Flow and Trust Boundaries
+---
+
+## Data Flow & Network Isolation
 
 ```mermaid
 flowchart TD
-    subgraph Untrusted_External["Untrusted External Boundaries"]
-        CLI_Input["CLI Arguments & Wordlists"]
-        Target_App["Target Web Server & WAF"]
-        Archive_API["Wayback Machine API"]
+    subgraph Untrusted_Inputs["Untrusted Operator Inputs & Targets"]
+        Target_URL["Target URL (-u) & Wordlists (-w)"]
+        Target_Server["Target Web Applications & Firewalls"]
+        Archive_APIs["Public Archive APIs (Wayback, etc.)"]
     end
 
-    subgraph Guardrail_Layer["Guardrail & Isolation Layer"]
-        Val["parse_target() & Path.is_file() checks"]
-        AuthGate["authorization_gate() Confirmation"]
-        ScopeCheck["in_scope() Host Matcher"]
-        SubprocSafe["run_tool() with shell=False argument lists"]
+    subgraph Security_Guardrails["Input Sanitization & Operational Guardrails"]
+        URL_Val["parse_target() & ScopeManager allowlist/exclusions"]
+        Auth_Gate["Authorization Gate (--authorized)"]
+        Safe_Mode["Safe Mode (concurrency=1, rate_limit>=0.5s, non-destructive)"]
+        Circuit_Breaker["HostCircuitBreaker (automatic trip & recovery)"]
     end
 
-    subgraph Network_Isolation["Network Anonymization Layer"]
-        TorSocks["Tor SOCKS5 (127.0.0.1:9050)"]
-        TorCtrl["Stem Controller (127.0.0.1:9051)"]
-        Proxychains["proxychains4 -q wrapper"]
+    subgraph Anonymization_Layer["Network Anonymization Layer (socks5h://)"]
+        Proxy_Provider["ProxyProvider Engine (Tor / Rotating Pool / Direct)"]
+        Tor_SOCKS["Tor SOCKS5 Proxy (socks5h://127.0.0.1:9050 - Remote DNS)"]
+        Tor_Ctrl["Stem Control Port (127.0.0.1:9051 - Signal.NEWNYM)"]
     end
 
-    subgraph Tooling_Pipeline["Tooling Execution Layer"]
-        WAF_Check["wafw00f & waf_payloads.py"]
-        Sub_Enum["subfinder & httpx"]
-        URL_Harvest["waybackpy & paramspider"]
-        Vuln_Engines["dalfox, sqlmap, ffuf, nuclei"]
+    subgraph Tooling_Execution["Tooling Orchestration Layer"]
+        Executor["AsyncExecutor (native proxy args & ALL_PROXY injection)"]
+        Drivers["DriverRegistry & 12 Scanner Drivers (shell=False)"]
+        Event_Bus["AsyncEventBus (pub/sub topics)"]
     end
 
-    subgraph Storage_Layer["Output Artifacts Layer"]
-        RunDir["runs/{domain}-{timestamp}/"]
-        AuditLog["audit.log"]
-        HTMLReport["report.html"]
+    subgraph Persistence_Reporting["Persistence & Reporting Layer"]
+        SQLite_DB[("session.db (SQLite with SHA-256 Fingerprints)")]
+        Drift_Engine["SessionDiff (Differential Drift Analysis)"]
+        HTML_Rep["Offline HTML Report (Embedded SVGs)"]
+        SARIF_Rep["OASIS SARIF v2.1.0 (GitHub Security)"]
+        PDF_Rep["Executive PDF Report (WeasyPrint)"]
+        Webhook_Alert["Real-time Webhook Alerts (Slack/Discord)"]
     end
 
-    CLI_Input --> Val --> AuthGate
-    Target_App <--> TorSocks
-    TorCtrl -.->|Signal.NEWNYM| TorSocks
-    AuthGate --> SubprocSafe
-    SubprocSafe --> Proxychains --> Tooling_Pipeline
-    SubprocSafe --> WAF_Check
-    WAF_Check --> ScopeCheck --> TorSocks
-    Tooling_Pipeline --> Storage_Layer
-    Tooling_Pipeline <--> Archive_API
-    Storage_Layer --> HTMLReport
-    Storage_Layer --> AuditLog
+    Target_URL --> URL_Val --> Auth_Gate --> Safe_Mode
+    Safe_Mode --> Circuit_Breaker --> Drivers
+    Drivers --> Executor --> Proxy_Provider
+    Proxy_Provider --> Tor_SOCKS
+    Tor_Ctrl -.->|Signal.NEWNYM on 403/429| Tor_SOCKS
+    Tor_SOCKS <--> Target_Server
+    Tor_SOCKS <--> Archive_APIs
+
+    Drivers --> Event_Bus
+    Event_Bus --> Webhook_Alert
+    Drivers --> SQLite_DB
+    SQLite_DB --> Drift_Engine
+    SQLite_DB --> HTML_Rep
+    SQLite_DB --> SARIF_Rep
+    SQLite_DB --> PDF_Rep
 ```
 
-### Trust Boundary Details:
-1. **Operator Input Boundary**:
-   - `args.url` is validated by `utils.parse_target()`. Only `http` and `https` schemes with valid hostnames are accepted; any invalid scheme or unparseable target throws a `ValueError`.
-   - `args.wordlist` and optional `args.lfi_payloads` are strictly checked for file existence via `Path.is_file()`.
-   - Command construction avoids `shell=True` and string interpolation; all CLI arguments are executed as discrete argument vectors (`argv` lists), preventing command injection.
+---
 
-2. **Network Request Boundary**:
-   - Outbound HTTP requests from Python use Tor's SOCKS5 proxy (`socks5://127.0.0.1:9050`).
-   - `utils.in_scope()` validates every generated payload URL against the target apex domain before dispatching, preventing scanning of out-of-scope third-party hosts.
-   - External CLI tools are wrapped with `proxychains -q` (unless disabled via `--no-proxychains` or running `paramspider`, which handles its own network calls).
+## Trust Boundaries & Security Model
 
-3. **Storage & Log Boundary**:
-   - Artifacts are strictly scoped inside `runs/<domain>-<timestamp>/`.
-   - Every external process invocation and HTTP interaction is recorded in `audit.log`.
-   - In HTML report generation, text content from output files is sanitized through `html.escape()`.
+1. **Operator Input & Scope Validation**:
+   - Every target is parsed via `parse_target()`. Only valid HTTP/HTTPS URLs with valid domain names are accepted.
+   - `ScopeManager` enforces an apex domain allowlist combined with exact hostname, wildcard pattern (e.g. `mail.*`), and CIDR block exclusions (e.g. `10.0.0.0/8`).
+   - All external commands are executed as discrete argument vectors (`List[str]`) using Python's `asyncio.create_subprocess_exec` with `shell=False`, strictly eliminating shell injection vulnerabilities.
 
-## Verified Facts vs. Hypotheses
+2. **Network Anonymization & DNS Leak Prevention**:
+   - Outbound traffic strictly defaults to `socks5h://127.0.0.1:9050`. The `h` scheme ensures domain names are never resolved locally by the host OS DNS resolver; all name lookups happen remotely on the Tor exit node.
+   - External CLI tools receive direct proxy flags (`-x`, `--proxy`, `-proxy-socks-url`) and the ambient subprocess environment is injected with `ALL_PROXY=socks5h://127.0.0.1:9050`.
+   - On HTTP 403 or 429 response codes, `TorManager` sends an authenticated `NEWNYM` signal across Tor's control port (`9051`) to cycle the exit circuit.
 
-### Facts (Directly observed in codebase):
-- The tool requires Python 3.9+ and external CLI tools (`subfinder`, `httpx`, `waybackpy`, `ffuf`, `nuclei`, `paramspider`, `dalfox`, `sqlmap`, `wafw00f`, `proxychains4`, `tor`).
-- Active scanning requires the `--authorized` flag. If running interactively, the operator must confirm by retyping the target domain (bypassable in automation via `--yes`).
-- WAF bypass payloads are static heuristics defined across 20 builders in `waf_payloads.py`.
-- Subprocess invocations never use `shell=True`. Stdout redirection is handled natively in Python using `capture_to`.
-- All tests pass (8 tests in `tests/test_shadowrecon.py`).
-
-### Verified Findings on WAF Bypass Efficacy & ParamSpider Integration:
-- **ParamSpider Filename & Directory Disconnect (Defect Verified)**:
-  - In `/usr/lib/python3/dist-packages/paramspider/main.py` lines 105–110, ParamSpider writes results to a subdirectory named `results/` using the raw domain: `results/{domain}.txt` (e.g., `results/api.example.com.txt`).
-  - In `main.py` lines 341–343, ShadowRecon expects output in the current working directory (`.`) with all dots replaced by underscores: `pf = Path(re.sub(r"[/:.]", "_", stem) + ".txt")` (e.g., `./api_example_com.txt`).
-  - As a result, `pf.exists()` is always `False`, causing ShadowRecon to silently skip all ParamSpider results and merge 0 URLs.
-- **WAF Bypass Heuristics Efficacy (Behavior Verified)**:
-  - *Heuristics vs Modern WAFs*: The 20 builders in `waf_payloads.py` rely on legacy bypass tricks (e.g., `User-Agent: Googlebot`, `X-Forwarded-For: 127.0.0.1`, `%2e`, null bytes `%2500`, and custom headers like `X-NAXSI: test`). Modern cloud WAFs (Cloudflare, AWS WAF, Akamai Kona) employ forward-confirmed reverse DNS (FCrDNS), TLS/JA3/JA4 fingerprinting, and strict RFC 3986 URI normalization, rendering these simple header spoofing and path mutation tricks ineffective or even causing them to be flagged as malicious bot activity.
-  - *No Attack Context*: `stage_waf` tests base URLs without offensive payloads (e.g., `https://example.com/` with `User-Agent: Googlebot`). Because the target URL returns 200 OK naturally, ShadowRecon marks it as a "WAF-bypass 200 OK", which is a false-positive indicator of bypass capability.
-  - *Disconnected from Subsequent Stages*: Even if a mutation in `stage_waf` returns 200 OK, `main.py` does not propagate the successful header, method, or path mutation to the active scanning tools (`dalfox`, `sqlmap`, `ffuf`).
-
+3. **Storage, Diffing & Report Sanitization**:
+   - All session data is strictly stored in the dedicated output directory (`runs/<domain>-<timestamp>/session.db`).
+   - Vulnerabilities are assigned a deterministic SHA-256 fingerprint:
+     $$\text{fingerprint} = \text{sha256}(\text{rule\_id} : \text{target\_url} : \text{param} : \text{payload})$$
+     This guarantees idempotent storage and reliable cross-session drift comparison.
+   - HTML report rendering passes all untrusted strings through `html.escape()`. SARIF and JSON exports serialize data strictly using standard JSON encoders.

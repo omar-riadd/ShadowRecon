@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from shadowrecon import __version__
 from shadowrecon.core.scope import read_lines
 from shadowrecon.storage.diff import SessionDiff
 from shadowrecon.storage.session import SessionStore
@@ -213,9 +214,9 @@ def generate_report_from_store(
 
     doc = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ShadowRecon v3.0 Report — {html.escape(str(meta.get('Target','')))}</title>
+<title>ShadowRecon v{__version__} Report — {html.escape(str(meta.get('Target','')))}</title>
 <style>{_CSS}</style></head><body><div class="wrap">
-<header><div class="logo"><span class="s">Shadow</span><span class="r">Recon</span> <small style="font-size:14px;color:var(--muted)">v3.0</small></div>
+<header><div class="logo"><span class="s">Shadow</span><span class="r">Recon</span> <small style="font-size:14px;color:var(--muted)">v{__version__}</small></div>
 <div class="sub">Tor-anonymized reconnaissance &amp; vulnerability report</div></header>
 <section class="meta">{meta_html}</section>
 <h2>Summary</h2><section class="cards">{cards}</section>
