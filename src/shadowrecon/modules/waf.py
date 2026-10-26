@@ -60,7 +60,7 @@ def _sync_http_request(
         log.info("[dry-run] %s %s", method, url)
         return 200, 0
 
-    proxies = None
+    proxies = {"http": None, "https": None}
     if cfg.use_proxy:
         proxy_url = proxy_provider.get_proxy_url() if proxy_provider else cfg.tor_socks
         if proxy_url:
