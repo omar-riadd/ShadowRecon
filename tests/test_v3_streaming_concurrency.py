@@ -18,6 +18,7 @@ from shadowrecon.drivers.tools import HttpxDriver
 from shadowrecon.modules.recon import (
     consume_live_hosts_stream,
     run_probing_stage,
+    run_progressive_recon,
     run_subdomains_stage,
     run_urls_stage,
 )
@@ -256,6 +257,48 @@ class TestStreamingAndConcurrency(unittest.TestCase):
             urls = await run_urls_stage(ctx)
             self.assertEqual(len(urls), 2)
             self.assertEqual(max_concurrent, 1)  # Strictly serialized in safe-mode
+
+        asyncio.run(run_test())
+
+    def test_progressive_recon_streaming_execution(self) -> None:
+        async def run_test() -> None:
+            ctx = self._make_context(concurrency=2)
+            ctx.config.driver_urls = "driver_stream"
+
+            # Mock probing driver that emits 2 hosts
+            mock_probing = MagicMock(spec=ScannerDriver)
+            mock_probing.name = "httpx"
+            mock_probing.is_available.return_value = True
+
+            async def fake_probing(c, **kwargs):
+                c.store.add_hosts([
+                    HostRecord(url="https://site1.example.com", status_code=200),
+                    HostRecord(url="https://site2.example.com", status_code=200),
+                ])
+                return ScanResult(success=True, items_count=2)
+
+            mock_probing.execute = AsyncMock(side_effect=fake_probing)
+            self.registry.register("probing", mock_probing, is_default=True)
+
+            # Mock crawler driver that extracts URL per host
+            mock_crawler = MagicMock(spec=ScannerDriver)
+            mock_crawler.name = "driver_stream"
+            mock_crawler.is_available.return_value = True
+
+            async def fake_crawler(c, live_file=None, **kwargs):
+                host_line = live_file.read_text(encoding="utf-8").strip() if live_file and live_file.is_file() else ""
+                discovered = [f"{host_line}/profile?id=99"] if host_line else []
+                return ScanResult(success=True, items_count=len(discovered), metadata={"urls": discovered})
+
+            mock_crawler.execute = AsyncMock(side_effect=fake_crawler)
+            self.registry.register("urls", mock_crawler)
+
+            live_hosts, urls = await run_progressive_recon(ctx)
+
+            self.assertEqual(len(live_hosts), 2)
+            self.assertEqual(len(urls), 2)
+            self.assertIn("https://site1.example.com/profile?id=99", urls)
+            self.assertIn("https://site2.example.com/profile?id=99", urls)
 
         asyncio.run(run_test())
 

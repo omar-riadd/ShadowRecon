@@ -6,7 +6,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Callable, Coroutine, List, Optional, Set
+from typing import Any, Callable, Coroutine, List, Optional, Set, Tuple
 
 from shadowrecon.core.executor import resolve_binary
 from shadowrecon.core.scope import is_in_scope, read_lines, slugify
@@ -185,6 +185,93 @@ async def run_urls_stage(ctx: StageContext, live_file: Optional[Path] = None) ->
 
     return stored_urls
 
+
+async def run_progressive_recon(ctx: StageContext) -> Tuple[List[str], List[str]]:
+    """Execute progressive producer-consumer reconnaissance.
+
+    Downstream URL harvesting workers consume 'host_live' events as they are discovered
+    by the probing stage, rather than waiting for probing across all subdomains to complete.
+    """
+    driver_names = [d.strip() for d in ctx.config.driver_urls.split(",") if d.strip()]
+    if not driver_names:
+        driver_names = ["wayback", "katana", "paramspider"]
+
+    concurrency = 1 if ctx.config.safe_mode else max(1, getattr(ctx.config, "concurrency", 1))
+    sem = asyncio.Semaphore(concurrency)
+    all_discovered_urls: List[str] = []
+    worker_tasks: Set[asyncio.Task] = set()
+
+    queue = ctx.bus.subscribe("host_live")
+
+    async def _crawl_single_host(host_url: str) -> None:
+        async with sem:
+            clean = host_url.strip()
+            if not clean or not ctx.is_in_scope(clean):
+                return
+            temp_file = ctx.config.outdir / f"live_{slugify(clean)}.txt"
+            temp_file.write_text(clean + "\n", encoding="utf-8")
+            try:
+                for d_name in driver_names:
+                    if d_name == "wayback":
+                        continue  # Wayback operates domain-wide, handled once
+                    try:
+                        driver = ctx.drivers.get_driver("urls", d_name)
+                        if not driver.is_available() and not ctx.config.dry_run:
+                            continue
+                        res = await driver.execute(ctx, live_file=temp_file)
+                        for u in res.metadata.get("urls", []):
+                            if "=" in u and ctx.is_in_scope(u):
+                                all_discovered_urls.append(u)
+                    except Exception as exc:
+                        log.debug("Progressive URL driver '%s' failed on '%s': %s", d_name, clean, exc)
+            finally:
+                temp_file.unlink(missing_ok=True)
+
+    async def _consumer_loop() -> None:
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if item.data and isinstance(item.data, str):
+                t = asyncio.create_task(_crawl_single_host(item.data))
+                worker_tasks.add(t)
+                t.add_done_callback(worker_tasks.discard)
+
+    consumer_task = asyncio.create_task(_consumer_loop())
+
+    # Concurrently run probing stage (producer)
+    live_hosts = await run_probing_stage(ctx)
+
+    # Wait for all published events to be consumed
+    await consumer_task
+
+    # Wait for all in-flight crawlers to finish
+    if worker_tasks:
+        await asyncio.gather(*list(worker_tasks))
+
+    # Run wayback if requested
+    if "wayback" in driver_names:
+        wb_urls = await harvest_wayback(ctx)
+        for u in wb_urls:
+            if "=" in u and ctx.is_in_scope(u):
+                all_discovered_urls.append(u)
+
+    # Deduplicate and persist in session store
+    inserted = ctx.store.add_urls(all_discovered_urls, source="progressive_recon")
+    stored_urls = ctx.store.get_urls()
+
+    params_file = ctx.config.outdir / "params.txt"
+    params_file.parent.mkdir(parents=True, exist_ok=True)
+    params_file.write_text("\n".join(stored_urls) + ("\n" if stored_urls else ""), encoding="utf-8")
+    log.info("Progressive reconnaissance complete: %d live hosts, %d unique parameterized URLs (new=%d)", len(live_hosts), len(stored_urls), inserted)
+
+    for u in stored_urls:
+        await ctx.bus.publish("url", u, source="recon")
+        await ctx.bus.publish("param_url", u, source="recon")
+    await ctx.bus.close_topic("url")
+    await ctx.bus.close_topic("param_url")
+
+    return live_hosts, stored_urls
 
 
 async def run_fuzzing_stage(ctx: StageContext) -> None:
