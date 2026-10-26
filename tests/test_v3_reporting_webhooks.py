@@ -180,6 +180,14 @@ class TestReportingAndWebhooks(unittest.TestCase):
             self.assertEqual(header, b"%PDF-")
         self.assertGreater(res_path.stat().st_size, 1000)
 
+    def test_export_pdf_missing_weasyprint_raises_runtime_error(self) -> None:
+        self._seed_sample_data()
+        pdf_out = Path(self.tmp_dir.name) / "report_fail.pdf"
+        with patch("shadowrecon.reporting.pdf._WEASYPRINT_AVAILABLE", False):
+            with self.assertRaises(RuntimeError) as ctx:
+                export_pdf(self.store, pdf_out)
+            self.assertIn("WeasyPrint or its system C dependencies", str(ctx.exception))
+
     # -------------------------------------------------------------------------
     # Webhook Target Classification & Payloads Tests
     # -------------------------------------------------------------------------

@@ -512,8 +512,11 @@ async def async_main(argv: Optional[List[str]] = None) -> int:
         export_markdown(store, cfg.export_md, meta=report_meta, diff=diff_result)
         log.info("Markdown Report exported -> %s", cfg.export_md)
     if cfg.export_pdf:
-        export_pdf(store, cfg.export_pdf, meta=report_meta, diff=diff_result)
-        log.info("PDF Report exported -> %s", cfg.export_pdf)
+        try:
+            export_pdf(store, cfg.export_pdf, meta=report_meta, diff=diff_result)
+            log.info("PDF Report exported -> %s", cfg.export_pdf)
+        except Exception as exc:
+            log.warning("PDF report export skipped: %s", exc)
 
     # Send Completion Webhook Notification
     if cfg.webhook_url and "complete" in cfg.webhook_events:

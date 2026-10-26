@@ -199,16 +199,17 @@ class PreflightChecker:
     def check_python_dependencies(self) -> List[HealthCheckResult]:
         """Verify core and reporting Python library dependencies."""
         results = []
-        # WeasyPrint
+        # WeasyPrint and native C dependencies
         try:
             import weasyprint
+            from weasyprint.text.ffi import pango, gobject  # type: ignore # noqa: F401
             v = getattr(weasyprint, "__version__", "unknown")
             results.append(
                 HealthCheckResult(
                     name="weasyprint",
                     category="Python Packages",
                     status=CheckStatus.OK,
-                    message=f"Installed (v{v}) for executive PDF generation",
+                    message=f"Installed (v{v}) with native Pango/Cairo C dependencies",
                 )
             )
         except ImportError:
@@ -219,6 +220,16 @@ class PreflightChecker:
                     status=CheckStatus.WARNING,
                     message="Not installed. PDF report export will be unavailable.",
                     remediation="Install via 'pip install weasyprint' or 'sudo apt install python3-weasyprint'",
+                )
+            )
+        except OSError as exc:
+            results.append(
+                HealthCheckResult(
+                    name="weasyprint",
+                    category="Python Packages",
+                    status=CheckStatus.WARNING,
+                    message=f"Python package installed but system C libraries missing: {exc}",
+                    remediation="Install system libraries: 'sudo apt install libpango-1.0-0 libcairo2 libgobject-2.0-0'",
                 )
             )
 

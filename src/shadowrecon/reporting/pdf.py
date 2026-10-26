@@ -7,7 +7,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import weasyprint
+try:
+    import weasyprint
+    from weasyprint.text.ffi import pango, gobject  # type: ignore # noqa: F401
+    _WEASYPRINT_AVAILABLE = True
+    _WEASYPRINT_ERROR = None
+except (ImportError, OSError) as _exc:
+    weasyprint = None  # type: ignore
+    _WEASYPRINT_AVAILABLE = False
+    _WEASYPRINT_ERROR = str(_exc)
 
 from shadowrecon import __version__
 from shadowrecon.reporting.sarif import resolve_cwe_metadata
@@ -368,6 +376,11 @@ def export_pdf(
     diff: Optional[SessionDiff] = None,
 ) -> Path:
     """Generate executive PDF report using WeasyPrint and write to output_path."""
+    if not _WEASYPRINT_AVAILABLE or weasyprint is None:
+        raise RuntimeError(
+            f"WeasyPrint or its system C dependencies (libpango, libcairo) are not available: {_WEASYPRINT_ERROR}. "
+            "Please install system libraries ('sudo apt install python3-weasyprint' or 'sudo apt install libpango-1.0-0 libcairo2')."
+        )
     html_markup = generate_pdf_html(store, meta=meta, diff=diff)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     weasyprint.HTML(string=html_markup).write_pdf(target=str(output_path))
